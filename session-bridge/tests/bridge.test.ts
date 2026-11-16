@@ -5,7 +5,7 @@ import { deflateRawSync } from "node:zlib";
 import { prepare, pack, verify, verifyBytes, unpack, zipEncode, zipDecode, readBytes, readJSON,
   writeNew, writeJSON, hash, checkPaths, sensitive, temporary, remove, discoverSkills,
   syntheticFixture, installRecoveredSkills, installSkill, encrypt, decrypt, download,
-  upload, validateURL, parseJSON, parseTransfer, LIMIT, Entry, main } from "../scripts/session-bridge.ts";
+  upload, validateURL, parseJSON, parseTransfer, renderPrompt, LIMIT, Entry, main } from "../scripts/session-bridge.ts";
 
 let root: string, options: ReturnType<typeof syntheticFixture>;
 beforeEach(() => { root = temporary(); options = syntheticFixture(root); });
@@ -212,6 +212,24 @@ test("upload contains age ciphertext only, uses actual server expiry", async () 
     submitted = o?.body; return { status: 201, headers: new Headers(), data: Buffer.from(JSON.stringify({ bin: { expired_at: "2099-01-01T00:00:00Z" }, file: { bytes: data.length, sha256: hash(data) } })) };
   });
   expect(submitted).toEqual(data); expect(r.expiry_basis).toBe("provider_response"); expect(r.reported_expires_at).toBe("2099-01-01T00:00:00Z"); await expect(upload(data, "filebin", "24h")).rejects.toThrow();
+});
+test("compact continuation prompt retains everything needed to download and decrypt", async () => {
+  const source = archive(), cipher = path.join(root, "prompt.age"), identity = await encrypt(source, cipher);
+  const ciphertext = readBytes(cipher), bundle = verifyBytes(readBytes(source));
+  const transfer = { version: 1, provider: "filebin", download_url: "https://filebin.net/synthetic/task.age", bundle_id: bundle.bundle_id,
+    ciphertext_bytes: ciphertext.length, ciphertext_sha256: hash(ciphertext), encryption: "age-v1-x25519", identity, delete_after_restore: false,
+    reported_expires_at: "2099-01-01T00:00:00Z", estimated_expires_at: null, uploaded_at: "2098-12-25T00:00:00Z", requested_ttl: "provider-default",
+    expiry_basis: "provider_response", deletion_support: "url-capability", locator_also_allows_delete: true };
+  const compact = parseTransfer(renderPrompt(transfer));
+  expect(compact.identity).toBe(identity); expect(compact.bundle_id).toBe(bundle.bundle_id);
+  expect(compact.reported_expires_at).toBe(transfer.reported_expires_at); expect(compact.uploaded_at).toBeUndefined();
+  const downloaded = await download(compact.download_url, compact.provider, compact.ciphertext_bytes, compact.ciphertext_sha256,
+    async () => ({ status: 200, headers: new Headers(), data: ciphertext }));
+  const received = path.join(root, "received.age"), plain = path.join(root, "received.zip"); writeNew(received, downloaded);
+  await decrypt(received, compact.identity, plain);
+  expect(readBytes(plain)).toEqual(readBytes(source));
+  const legacy = parseTransfer("<session-bridge-transfer>\n" + JSON.stringify(transfer, null, 2) + "\n</session-bridge-transfer>");
+  for (const field of Object.keys(compact)) expect(compact[field]).toEqual(legacy[field]);
 });
 test("source installer reuses a healthy installation and backs up explicit upgrades", async () => {
   const source = path.resolve(import.meta.dir, ".."), registry = path.join(root, "installer");

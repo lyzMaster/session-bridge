@@ -3,14 +3,14 @@
   const commands = { macos: 'chmod +x ./session-bridge-macos-universal\n./session-bridge-macos-universal install', windows: '.\\session-bridge-windows-x64.exe install' };
   let os = 'macos', timer;
   const toast = message => { const el = document.getElementById('toast'); el.textContent = message; el.hidden = false; clearTimeout(timer); timer = setTimeout(() => { el.hidden = true; }, 3000); };
-  async function copy(text) {
-    try { await navigator.clipboard.writeText(text); toast('已复制，可以交给你的 Agent 了。'); }
+  async function copy(text, message) {
+    try { await navigator.clipboard.writeText(text); toast(message); }
     catch {
       const input = document.createElement('textarea'); input.value = text; input.setAttribute('readonly', ''); input.style.cssText = 'position:fixed;left:-9999px;top:0'; document.body.append(input); input.select();
-      const ok = document.execCommand('copy'); input.remove(); toast(ok ? '已复制，可以交给你的 Agent 了。' : '复制未完成，请选择提示词后手动复制。');
+      const ok = document.execCommand('copy'); input.remove(); toast(ok ? message : '复制未完成，请选择提示词后手动复制。');
     }
   }
-  document.querySelectorAll('[data-copy]').forEach(button => button.addEventListener('click', () => copy(button.dataset.copy === 'command' ? commands[os] : prompt)));
+  document.querySelectorAll('[data-copy]').forEach(button => button.addEventListener('click', () => copy(button.dataset.copy === 'command' ? commands[os] : prompt, button.dataset.copy === 'command' ? '已复制安装命令。' : '已复制，请在源端当前会话中发送。')));
   const tabs = [...document.querySelectorAll('[data-tab]')];
   function selectTab(button) {
     tabs.forEach(tab => { const selected = tab === button; tab.setAttribute('aria-selected', String(selected)); tab.tabIndex = selected ? 0 : -1; document.getElementById(tab.getAttribute('aria-controls')).hidden = !selected; });

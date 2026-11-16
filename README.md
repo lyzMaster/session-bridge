@@ -20,12 +20,12 @@ Windows x64、macOS 13+（Intel / Apple Silicon）每个平台只需一个可执
 
 ## 安装或复用
 
-直接把本仓库地址交给 harness，并说明你的任务：
+在 SOURCE 当前会话中发送下面这段话，默认完成打包和加密上传，再生成发给 TARGET 的短提示词：
 
 ```text
-请使用 https://github.com/lyzMaster/session-bridge 。
-先按 INSTALL.md 复用可用安装；没有安装时再下载校验并安装。
-然后使用安装目录中的 SKILL.md 继续当前任务。
+请使用 https://github.com/lyzMaster/session-bridge ，可用则复用，未安装则按 INSTALL.md 安装。
+将当前 session 的上下文、附件、工作文件和实际用过的 Skill 打包，本地加密后上传 Filebin，并回读校验。
+成功后只输出一段发给 TARGET 的简短接续提示词：一句“恢复并继续这个任务”、项目地址和完整交接凭证（压成一行），省略安装步骤、命令和格式说明。
 ```
 
 也可以从 [Releases](https://github.com/lyzMaster/session-bridge/releases/latest) 手动下载对应程序，执行 `install`。`detect-harness` 可预览目录选择，`--harness`、`--skills-dir` 可显式指定；`--scope project --cwd <项目目录>` 安装到项目。可用版本返回 `reused`，明确升级使用 `--replace`。默认选择当前 harness，不会向检测到的所有产品安装。
