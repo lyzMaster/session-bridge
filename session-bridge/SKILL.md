@@ -4,13 +4,13 @@ description: Transfer agent tasks between harnesses with history, attachments, w
 license: MIT
 compatibility: Requires Windows x64 or macOS 13+, file access and command execution. Network access is needed for public transfers. Standalone executables include the runtime.
 metadata:
-  version: "0.5.0"
+  version: "0.5.1"
   repository: "https://github.com/lyzMaster/session-bridge"
 ---
 
 # Session Bridge
 
-Executable v0.5.0. Project and first-use guide: https://github.com/lyzMaster/session-bridge / INSTALL.md. In this installed Skill directory, run `./session-bridge` on macOS or `& '.\session-bridge.exe'` in Windows PowerShell; use an absolute executable path from other working directories. The one executable embeds Bun, age-compatible encryption, HTTP, ZIP, these instructions and the vercel-labs/skills 1.9.0 library. No separately installed Bun, Node, Python, age, Git, npm packages or DLL sidecars are needed. `doctor` checks the local runtime without network/session access. The optional source distribution runs with `bun --no-install scripts/session-bridge.ts` and needs Bun >=1.3.6.
+Executable v0.5.1. Project and first-use guide: https://github.com/lyzMaster/session-bridge / INSTALL.md. In this installed Skill directory, run `./session-bridge` on macOS or `& '.\session-bridge.exe'` in Windows PowerShell; use an absolute executable path from other working directories. The one executable embeds Bun, age-compatible encryption, HTTP, ZIP, these instructions and the vercel-labs/skills 1.9.0 library. No separately installed Bun, Node, Python, age, Git, npm packages or DLL sidecars are needed. `doctor` checks the local runtime without network/session access. The optional source distribution runs with `bun --no-install scripts/session-bridge.ts` and needs Bun >=1.3.6.
 
 ## Install or reuse
 

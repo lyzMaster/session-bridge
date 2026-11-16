@@ -45,10 +45,13 @@ jobs:
       - run: bun build.ts --standalone --targets=${{ matrix.targets }}
       - name: Run native executable with no external runtimes on PATH
         run: bun scripts/native-smoke.ts
+      - name: Resolve the exact artifact directory
+        id: output
+        run: bun -e "await Bun.write(process.env.GITHUB_OUTPUT, 'directory=dist/standalone-' + (await Bun.file('package.json').json()).version + '\n')"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.target }}
-          path: dist/standalone-*/*
+          path: ${{ steps.output.outputs.directory }}/
           if-no-files-found: error
           retention-days: 1
   publish:

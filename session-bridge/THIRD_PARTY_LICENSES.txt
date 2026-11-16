@@ -1,4 +1,4 @@
-Session Bridge 0.5.0 — bundled third-party notices
+Session Bridge 0.5.1 — bundled third-party notices
 
 Build/runtime sources: https://github.com/oven-sh/bun/tree/bun-v1.3.6
 Encryption sources: https://github.com/FiloSottile/typage/tree/v0.3.1

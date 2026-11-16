@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 
-export const VERSION = "0.5.0";
+export const VERSION = "0.5.1";
 export const LIMIT = { files: 10000, meta: 8 * 1024 ** 2, file: 128 * 1024 ** 2,
   total: 256 * 1024 ** 2, archive: 100_000_000, transfer: 128 * 1024, skills: 128 };
 export class BridgeError extends Error {
