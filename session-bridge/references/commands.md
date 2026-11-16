@@ -31,11 +31,12 @@ Explicit directory takes precedence over harness detection. An explicit harness 
 ./session-bridge-macos-universal install --harness codex --scope project --cwd /project
 ./session-bridge-macos-universal install --skills-dir /custom/skills
 ./session-bridge-macos-universal install --replace
+./session-bridge-macos-universal install --require-transfer-version 2
 ```
 
 `install` returns `reused` when an existing compatible executable passes a local doctor check and its managed files match the integrity receipt; it does not rewrite files. A legacy native v0.3 install without a receipt can be reused after a health check. A damaged managed install is backed up and repaired. `--replace` explicitly upgrades even a healthy version. The candidate is copied/validated through the embedded skills API before touching the existing directory; replacement preserves a sibling `skill-backups/session-bridge-...` backup. A failed candidate keeps the old version. Healthy shared Skills reached through a registry link can be reused, but replacement/repair through a link and unrelated Skill folders are refused. Library operations are local-only, copy mode, telemetry disabled, with no package manager, Git or upstream lock writes.
 
-Installing creates SKILL.md, references, license notices, one executable and an `installation.json` receipt. Refresh the host Skill catalog if needed, or directly read the installed SKILL.md for the current task. Reusing does not force an upgrade or make a network request.
+Multipart transfers require doctor.compatibility.transfer_versions to include 2. `install --require-transfer-version 2` backs up and upgrades a healthy older installation that lacks that capability; compatible versions are still reused. Installing creates SKILL.md, references, license notices, one executable and an `installation.json` receipt. Refresh the catalog if needed, or read installed SKILL.md directly. Reuse makes no network request.
 
 The remaining POSIX examples run inside the installed Skill folder. In PowerShell replace `./session-bridge` with `& '.\session-bridge.exe'`; pass the same arguments on one line and use Windows paths. From elsewhere use the absolute executable path. Explicitly installing creates Skill files; the executable itself needs no sidecar files.
 
@@ -70,7 +71,7 @@ Selected folders include SKILL.md, scripts, assets, references, agent metadata a
 
 ```sh
 ./session-bridge share /transfer/task.session.zip \
-  --provider filebin --ttl provider-default --out /transfer/shared
+  --provider auto --ttl provider-default --out /transfer/shared
 ./session-bridge receive --transfer-file /transfer/continuation-prompt.txt \
   --dest /new/recovery --skills-dir /path/to/target-harness/skills
 ```
@@ -81,7 +82,20 @@ Windows import example:
 & "$env:USERPROFILE\.codex\skills\session-bridge\session-bridge.exe" receive --transfer-file 'C:\handoff\continuation-prompt.txt' --dest 'C:\work\recovered'
 ```
 
-Share encrypts locally, uploads only randomized ciphertext and verifies a fresh download before producing the copyable secret prompt. Stdout omits the private key. Keep share files outside future snapshots. Receive accepts `--transfer-file -` for stdin; never put the identity in command arguments. Filebin's reported default expiry is approximately seven days. Expiry/deletion cannot retract downloaded copies.
+Auto measures actual encrypted upload/readback to Filebin and Temp.sh from the current network, selects the first verified route, and reuses that upload. Pin a site with `--provider filebin` or `--provider tempsh`. The first part is at most 256 KiB; later parts default to at most 8 MiB with 3 workers, adapting down to 256 KiB and up to 6 workers on slow measured links. `--part-mib 1..16` and `--concurrency 1..6` override those bounds. Every part and the small manifest are age-encrypted and independently verified; only `prompt_ready` means success. Stdout omits the private identity; stderr reports safe progress without keys or URLs.
+
+Keep the ZIP, identity and checkpoint outside future snapshots. After interruption repeat the same share command/output, or run:
+
+```sh
+./session-bridge resume-share --out /transfer/shared
+./session-bridge receive --transfer-file /transfer/continuation-prompt.txt --dest /new/recovery
+```
+
+Source resume skips verified uploads and finishes accepted-but-unverified readbacks. It can also finish readback of an older `payload.session.zip.age` using its existing receipt/key without re-uploading it. Target v2 retains verified encrypted parts in `/new/recovery.session-bridge-cache` after failure and skips them next time. `--cache <private-directory>` chooses another separate cache. Success removes the managed cache; failure creates no partial recovery directory. Legacy v1 Filebin downloads also gain 256 KiB Range caches; servers without range support use the bounded, hash-checked full-object path.
+
+Use asynchronous command execution/polling when the harness supports it. If its overall deadline kills the process, resume the same checkpoint; do not re-export, regenerate keys or edit the installed code. Native HTTP retries transient failures up to 4 times with backoff. Active reads reset a 45-second idle timer, with a separate size-aware total deadline. HTTPS, hashes and age authentication remain required.
+
+Receive accepts `--transfer-file -` for stdin; never put the identity in process arguments. Filebin reports its expiry, commonly about seven days; Temp.sh's three-day policy is an estimate. The earliest primary-object expiry bounds a multipart transfer. Expiry/deletion cannot retract downloaded copies.
 
 Import creates separate original evidence, editable projects and usable Skills:
 
@@ -117,9 +131,10 @@ Script arguments pass through, including `--options`. Restore itself never runs 
 ./session-bridge verify /transfer/task.session.zip
 ./session-bridge unpack /transfer/task.session.zip --dest /new/recovery
 ./session-bridge revoke --receipt /transfer/shared/upload-receipt.json
+./session-bridge revoke --receipt /transfer/shared/checkpoint.json
 ./session-bridge self-test
 ./session-bridge self-test --out /new/offline-test
-./session-bridge smoke-test --live --provider filebin --ttl provider-default --out /new/live-test
+./session-bridge smoke-test --live --provider auto --ttl provider-default --fixture-mib 95 --out /new/live-test
 ./session-bridge licenses
 ./session-bridge package --out /release/session-bridge-native-skill.zip
 ```
@@ -128,4 +143,4 @@ Script arguments pass through, including `--options`. Restore itself never runs 
 
 `package` creates an optional Skill ZIP containing this executable and embedded documents for the same OS/CPU; transferring the single executable and running `install` is sufficient. Build/test tooling and node_modules are not needed on receiving machines. Development checks: `bun run test` from the source repository.
 
-Limits: 100 MB compressed ZIP/ciphertext, 128 MiB per expanded file, 256 MiB aggregate expansion, 10,000 entries, 8 MiB metadata. Empty directories, symlinks, Git index/history and ownership/ACLs are not preserved. Files/executable bits are preserved where supported; POSIX permissions are not a Windows ACL guarantee. No automatic splitting.
+Limits: 512 MiB ZIP, 512 MiB per expanded file, 1 GiB aggregate expansion, 10,000 entries, 8 MiB metadata and 2,048 parts. Large ZIPs automatically split into bounded encrypted objects; local ZIP building still has explicit memory/expansion limits. Empty directories, symlinks, Git index/history and ownership/ACLs are not preserved. Files/executable bits are preserved where supported; POSIX permissions are not a Windows ACL guarantee.

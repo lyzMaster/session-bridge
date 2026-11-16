@@ -4,6 +4,7 @@
 *.pyc
 /node_modules/
 /site-dist/
+/network-verification.json
 /publication/
 /TEST_REPORT*.md
 /DESIGN.md

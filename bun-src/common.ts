@@ -3,9 +3,9 @@ import path from "node:path";
 import os from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 
-export const VERSION = "0.5.2";
-export const LIMIT = { files: 10000, meta: 8 * 1024 ** 2, file: 128 * 1024 ** 2,
-  total: 256 * 1024 ** 2, archive: 100_000_000, transfer: 128 * 1024, skills: 128 };
+export const VERSION = "0.6.0";
+export const LIMIT = { files: 10000, meta: 8 * 1024 ** 2, file: 512 * 1024 ** 2,
+  total: 1024 * 1024 ** 2, archive: 512 * 1024 ** 2, transfer: 128 * 1024, skills: 128 };
 export class BridgeError extends Error {
   constructor(public code: string, message: string) { super(message); }
 }
@@ -129,7 +129,7 @@ export function listing(root: string): { files: string[]; omissions: any[] } {
   function walk(dir: string) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const p = path.join(dir, entry.name), rel = path.relative(root, p).split(path.sep).join("/");
-      const reason = entry.isSymbolicLink() ? "symlink" : secretName(entry.name) ? "credential-filename" : SKIP.has(entry.name) ? "regenerable-directory" : (!entry.isDirectory() && !entry.isFile()) ? "special-file" : null;
+      const reason = entry.isSymbolicLink() ? "symlink" : secretName(entry.name) ? "credential-filename" : SKIP.has(entry.name) || entry.isDirectory() && entry.name.endsWith(".session-bridge-cache") ? "regenerable-directory" : (!entry.isDirectory() && !entry.isFile()) ? "special-file" : null;
       if (reason) { omissions.push({ path: rel, status: "excluded", reason }); continue; }
       if (entry.isDirectory()) walk(p); else files.push(rel);
     }

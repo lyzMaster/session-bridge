@@ -36,7 +36,8 @@ usable() {
   data="$("$candidate" doctor 2>/dev/null)" || return 1
   [[ "$(read_json "$data" ready)" == true && "$(read_json "$data" standalone)" == true &&
      "$(read_json "$data" skills_engine.package)" == skills &&
-     "$(read_json "$data" compatibility.installation_receipt_version)" == 1 ]]
+     "$(read_json "$data" compatibility.installation_receipt_version)" == 1 &&
+     "$(read_json "$data" transfer.resumable_uploads)" == true ]]
 }
 if [[ "$upgrade" == 0 ]]; then
   candidates=()
@@ -54,7 +55,7 @@ if [[ "$upgrade" == 0 ]]; then
     for registry in "${registries[@]}"; do candidates+=("$registry/session-bridge/session-bridge"); done
   fi
   for candidate in "${candidates[@]}"; do
-    if usable "$candidate"; then exec "$candidate" install "${forward[@]}"; fi
+    if usable "$candidate"; then exec "$candidate" install "${forward[@]}" --require-transfer-version 2; fi
   done
 fi
 [[ "$offline" == 0 ]] || { printf '%s\n' 'No compatible local installation found; offline mode did not download anything.' >&2; exit 2; }
@@ -86,4 +87,6 @@ actual_bytes="$(/usr/bin/wc -c < "$binary")"
 actual_hash="$(/usr/bin/shasum -a 256 "$binary")"; actual_hash="${actual_hash%% *}"
 [[ "$actual_bytes" -eq "$expected_bytes" && "$actual_hash" == "$expected_hash" ]] || { printf '%s\n' 'Downloaded executable failed integrity verification.' >&2; exit 2; }
 /bin/chmod 700 "$binary"
+runtime_data="$("$binary" doctor)"
+if [[ "$(read_json "$runtime_data" transfer.resumable_uploads)" == true ]]; then forward+=(--require-transfer-version 2); fi
 "$binary" install "${forward[@]}"

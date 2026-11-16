@@ -28,7 +28,8 @@ function Test-LocalExecutable([string]$Executable) {
   try {
     $Data = (& $Executable doctor 2>$null | Out-String | ConvertFrom-Json)
     return ($LASTEXITCODE -eq 0 -and $Data.ready -eq $true -and $Data.standalone -eq $true -and
-      $Data.skills_engine.package -eq 'skills' -and $Data.compatibility.installation_receipt_version -eq 1)
+      $Data.skills_engine.package -eq 'skills' -and $Data.compatibility.installation_receipt_version -eq 1 -and
+      $Data.compatibility.transfer_versions -contains 2 -and $Data.transfer.resumable_uploads -eq $true)
   } catch { return $false }
 }
 if (-not $Upgrade) {
@@ -54,6 +55,7 @@ if (-not $Upgrade) {
   }
   foreach ($Candidate in $Candidates) {
     if (Test-LocalExecutable $Candidate) {
+      $Forward += @('--require-transfer-version','2')
       & $Candidate install @Forward
       if ($LASTEXITCODE -ne 0) { throw "Local installer returned exit code $LASTEXITCODE" }
       return
@@ -86,6 +88,8 @@ try {
     $ActualHash = [BitConverter]::ToString($HashAlgorithm.ComputeHash($InputStream)).Replace('-','').ToLowerInvariant()
   } finally { $InputStream.Dispose(); $HashAlgorithm.Dispose() }
   if ($ActualHash -ne $Artifact.sha256) { throw 'Downloaded executable failed integrity verification.' }
+  $Runtime = (& $Executable doctor | Out-String | ConvertFrom-Json)
+  if ($Runtime.transfer.resumable_uploads -eq $true) { $Forward += @('--require-transfer-version','2') }
   & $Executable install @Forward
   if ($LASTEXITCODE -ne 0) { throw "Installer returned exit code $LASTEXITCODE" }
 } finally { Remove-Item -LiteralPath $TempDirectory -Recurse -Force -ErrorAction SilentlyContinue }

@@ -26,7 +26,7 @@ try {
   fs.appendFileSync(path.join(first.path, "references/commands.md"), "\nSynthetic modification\n");
   const repaired = run(["install", "--scope", "project"]); assert(repaired.status === "repaired" && fs.existsSync(repaired.backup), "Managed installation was not backed up and repaired"); checks.push("backup_and_repair");
   const explicit = run(["install", "--scope", "project", "--harness", "codex"]); assert(explicit.harness === "codex" && explicit.path.includes(".agents"), "Explicit harness override failed"); checks.push("explicit_harness");
-  const restored = run(["self-test"]); assert(restored.status === "passed" && restored.installed_skill_reused && restored.recovered_skill_executed && !restored.network_used, "Native recovery self-test failed"); checks.push("encryption_recovery_and_carried_skill");
+  const restored = run(["self-test"]); assert(restored.status === "passed" && restored.installed_skill_reused && restored.recovered_skill_executed && !restored.network_used && restored.multipart_roundtrip && restored.multipart_upload_resume, "Native recovery self-test failed"); checks.push("encryption_recovery_and_carried_skill", "multipart_recovery_and_upload_resume");
   const report = { status: "passed", version: VERSION, platform: process.platform, arch: process.arch, standalone: true,
     external_runtime_required: false, checks, tested_at: new Date().toISOString() };
   fs.writeFileSync(path.join(output, "native-verification.json"), JSON.stringify(report, null, 2) + "\n");

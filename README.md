@@ -16,15 +16,15 @@ Windows x64、macOS 13+（Intel / Apple Silicon）每个平台只需一个可执
 2. 本地打包与 age 加密，只将密文上传到公共临时文件中转站，回读校验后生成交接提示词。
 3. 目标端粘贴提示词，下载、校验、解密，在新目录恢复原始证据、工作区和 Skill，再继续任务。
 
-交接提示词同时携带下载能力与解密私钥。请只交给接收方；主页不接收任务内容或密钥。当前验证的公共中转为 Filebin，使用服务响应中的期限，通常约七天。
+交接提示词同时携带下载能力与解密私钥。请只交给接收方；主页不接收任务内容或密钥。默认用首片加密数据对 Filebin 和 Temp.sh 实测上传、回读，选择先通过校验的站点。Filebin 期限以服务响应为准，通常约七天；Temp.sh 的三天策略按估计标注。
 
 ## 安装或复用
 
 在 SOURCE 当前会话中发送下面这段话，默认完成打包和加密上传，再生成发给 TARGET 的短提示词：
 
 ```text
-请使用 https://github.com/lyzMaster/session-bridge ，可用则复用，未安装则按 INSTALL.md 安装。
-将当前 session 的上下文、附件、工作文件和实际用过的 Skill 打包，本地加密后上传 Filebin，并回读校验。
+请使用 https://github.com/lyzMaster/session-bridge ，按 INSTALL.md 安装或复用，缺少分片和断点恢复能力的旧版先升级。
+将当前 session 的上下文、附件、工作文件和实际用过的 Skill 打包，本地加密后按当前网络实测自动选择中转站，分片上传并回读校验；中断后从原检查点继续。
 成功后只输出一段发给 TARGET 的简短接续提示词：一句“恢复并继续这个任务”、项目地址和完整交接凭证（压成一行），省略安装步骤、命令和格式说明。
 ```
 
@@ -34,7 +34,7 @@ Windows x64、macOS 13+（Intel / Apple Silicon）每个平台只需一个可执
 
 ```text
 用 Session Bridge 导出当前任务，带上附件、工作文件和实际用过的 Skill。
-本地加密后上传 Filebin，生成可在另一台电脑继续任务的一段提示词。
+本地加密后实测选择中转站、分片上传，生成可在另一台电脑继续任务的一段提示词。
 ```
 
 目标端直接使用生成的提示词。它包含项目地址，因此未安装的接收方也能读取安装引导。完整参数见 [命令说明](session-bridge/references/commands.md)，覆盖范围见 [协议说明](session-bridge/references/protocol.md)。

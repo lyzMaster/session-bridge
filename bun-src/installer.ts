@@ -23,7 +23,7 @@ function executableAt(root: string): { path: string; native: boolean } | null {
   const script = path.join(root, "scripts/session-bridge.ts");
   return !STANDALONE && exists(script) ? { path: script, native: false } : null;
 }
-function health(root: string) {
+function health(root: string, requiredTransferVersion = 1) {
   try {
     // A registry may link an existing shared Skill. Health checking/reuse is read-only;
     // replacement still refuses links through ownedInstallation().
@@ -49,7 +49,8 @@ function health(root: string) {
     need(doctor?.ready === true && (!STANDALONE || doctor.standalone === true) && typeof doctor.version === "string" &&
       /^\d+\.\d+\.\d+$/.test(doctor.version) && compatible && doctor.crypto_format === "age-v1-x25519" && doctor.age_install_required === false,
       "INSTALL", "Installed executable is incompatible or requires an external runtime.");
-    return { usable: true, version: doctor.version, standalone: exe.native, files: rows.length, executable: exe.path,
+    return { usable: requiredTransferVersion === 1 || compatibility?.transfer_versions?.includes(requiredTransferVersion) === true,
+      healthy: true, version: doctor.version, standalone: exe.native, files: rows.length, executable: exe.path,
       integrity: receipt ? "receipt-verified" : "legacy-health-checked", receipt };
   } catch { return { usable: false }; }
 }
@@ -63,7 +64,9 @@ function reusedResult(root: string, previous: ReturnType<typeof health>, context
 export async function installSkill(source: string, skillsDir: string, replace = false, context: any = {}) {
   source = path.resolve(source);
   need(skillMetadata(path.join(source, "SKILL.md")).name === "session-bridge", "INSTALL", "Unexpected distribution identity.");
-  const parent = path.resolve(skillsDir), target = path.join(parent, "session-bridge"), previous = exists(target) ? health(target) : null;
+  const requiredTransferVersion = context.required_transfer_version || 1;
+  need([1, 2].includes(requiredTransferVersion), "INSTALL", "Required transfer version must be 1 or 2.");
+  const parent = path.resolve(skillsDir), target = path.join(parent, "session-bridge"), previous = exists(target) ? health(target, requiredTransferVersion) : null;
   if (previous?.usable && !replace) return reusedResult(target, previous, context);
   if (exists(target)) need(ownedInstallation(target), "DEST_EXISTS", "Destination belongs to another or linked Skill; choose a different skills directory.");
   fs.mkdirSync(parent, { recursive: true, mode: 0o700 });
@@ -79,7 +82,7 @@ export async function installSkill(source: string, skillsDir: string, replace = 
     need(upstream.failed.length === 0 && upstream.installed.length === 1, "INSTALL", "Embedded skills installer did not produce one complete Skill.");
     const stage = path.resolve(upstream.installed[0].path), expected = path.join(workspace, ".agents/skills/session-bridge");
     need(stage === expected && hash(json(snapshot(stage))) === hash(json(rows)), "INSTALL", "Staged Skill differs from source distribution.");
-    const stagedHealth = health(stage); need(stagedHealth.usable, "INSTALL", "Staged executable failed validation; existing installation is retained.");
+    const stagedHealth = health(stage, requiredTransferVersion); need(stagedHealth.usable, "INSTALL", "Staged executable failed validation; existing installation is retained.");
     const receipt = { format: "session-bridge-installation", receipt_version: 1, version: stagedHealth.version, installed_at: now(),
       platform: process.platform, arch: process.arch, files: rows, engine: SKILLS_ENGINE, ...context };
     writeJSON(path.join(stage, RECEIPT), receipt);
@@ -88,7 +91,7 @@ export async function installSkill(source: string, skillsDir: string, replace = 
       backup = path.join(backups, "session-bridge-" + Date.now() + "-" + uuid().slice(0, 8)); fs.renameSync(target, backup);
     }
     fs.renameSync(stage, target); committed = true;
-    return { status: previous?.usable ? "upgraded" : previous ? "repaired" : "installed", version: stagedHealth.version, path: target, backup,
+    return { status: previous?.healthy ? "upgraded" : previous ? "repaired" : "installed", version: stagedHealth.version, path: target, backup,
       files: rows.length + 1, standalone: stagedHealth.standalone, dependencies: stagedHealth.standalone ? [] : ["Bun >=1.3.6"],
       npm_install_required: false, python_required: false, age_install_required: false, engine: SKILLS_ENGINE, ...context };
   } catch (e) {
@@ -99,15 +102,17 @@ export async function installSkill(source: string, skillsDir: string, replace = 
   } finally { remove(tmp); }
 }
 
-export async function installForHarness(source: string | ((directory: string, context: any) => Promise<any>), options: TargetOptions & { replace?: boolean } = {}) {
+export async function installForHarness(source: string | ((directory: string, context: any) => Promise<any>), options: TargetOptions & { replace?: boolean; requireTransferVersion?: number } = {}) {
   const target = await resolveInstallTarget(options);
   let directory = target.skills_directory!;
-  const context = { harness: target.harness, scope: target.scope, selection_basis: target.selection_basis };
+  const requiredTransferVersion = options.requireTransferVersion || 1;
+  need([1, 2].includes(requiredTransferVersion), "INSTALL", "Required transfer version must be 1 or 2.");
+  const context = { harness: target.harness, scope: target.scope, selection_basis: target.selection_basis, required_transfer_version: requiredTransferVersion };
   for (const dir of target.candidate_directories) {
     const existing = path.join(dir, "session-bridge");
     if (!exists(existing)) continue;
     directory = dir;
-    if (!options.replace) { const check = health(existing); if (check.usable) return reusedResult(existing, check, context); }
+    if (!options.replace) { const check = health(existing, requiredTransferVersion); if (check.usable) return reusedResult(existing, check, context); }
     break;
   }
   // Resolve and reuse before materializing the embedded binary. A repeat install needs no

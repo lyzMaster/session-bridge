@@ -7095,8 +7095,9 @@ var require_dist4 = __commonJS((exports, module) => {
 });
 
 // bun-src/cli.ts
-import * as fs10 from "fs";
-import path10 from "path";
+import * as fs11 from "fs";
+import path11 from "path";
+import { randomBytes as randomBytes7 } from "crypto";
 
 // bun-src/common.ts
 var exports_common = {};
@@ -7134,13 +7135,13 @@ import * as fs from "fs";
 import path from "path";
 import os from "os";
 import { createHash, randomUUID } from "crypto";
-var VERSION = "0.5.2";
+var VERSION = "0.6.0";
 var LIMIT = {
   files: 1e4,
   meta: 8 * 1024 ** 2,
-  file: 128 * 1024 ** 2,
-  total: 256 * 1024 ** 2,
-  archive: 1e8,
+  file: 512 * 1024 ** 2,
+  total: 1024 * 1024 ** 2,
+  archive: 512 * 1024 ** 2,
   transfer: 128 * 1024,
   skills: 128
 };
@@ -7373,7 +7374,7 @@ function listing(root) {
   function walk(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
       const p = path.join(dir, entry.name), rel = path.relative(root, p).split(path.sep).join("/");
-      const reason = entry.isSymbolicLink() ? "symlink" : secretName(entry.name) ? "credential-filename" : SKIP.has(entry.name) ? "regenerable-directory" : !entry.isDirectory() && !entry.isFile() ? "special-file" : null;
+      const reason = entry.isSymbolicLink() ? "symlink" : secretName(entry.name) ? "credential-filename" : SKIP.has(entry.name) || entry.isDirectory() && entry.name.endsWith(".session-bridge-cache") ? "regenerable-directory" : !entry.isDirectory() && !entry.isFile() ? "special-file" : null;
       if (reason) {
         omissions.push({ path: rel, status: "excluded", reason });
         continue;
@@ -16969,11 +16970,110 @@ function executeScript(script, args = [], inherit = false) {
   };
 }
 
+// bun-src/network.ts
+var pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+var transient = new Set([408, 425, 429, 500, 502, 503, 504]);
+var httpOnce = async (url, options = {}, limit = LIMIT.meta, policy = {}) => {
+  const controller = new AbortController;
+  let reason = "", idle, lastProgress = Date.now();
+  const started = Date.now();
+  const idleMs = policy.idleMs ?? 45000;
+  const totalMs = policy.totalMs ?? Math.min(30 * 60000, Math.max(120000, Math.ceil(limit / 4096) * 1000 + 60000));
+  const abort = (code) => {
+    reason = code;
+    controller.abort();
+  };
+  const total = setTimeout(() => abort("TRANSFER_TIMEOUT"), totalMs);
+  const headers = setTimeout(() => abort("HEADER_TIMEOUT"), policy.headerMs ?? (options.method && options.method !== "GET" ? totalMs : 30000));
+  const external = () => abort("CANCELLED");
+  options.signal?.addEventListener("abort", external, { once: true });
+  if (options.signal?.aborted)
+    external();
+  let response;
+  try {
+    response = await fetch(url, {
+      ...options,
+      redirect: "manual",
+      signal: controller.signal,
+      headers: { "User-Agent": "session-bridge/" + VERSION, "Accept-Encoding": "identity", ...Object.fromEntries(new Headers(options.headers)) }
+    });
+    clearTimeout(headers);
+    const encoding = response.headers.get("content-encoding");
+    need(!new Headers(options.headers).has("range") || !encoding || encoding === "identity", "RANGE_UNSUPPORTED", "The relay transformed a byte-range response; use its verified full-object path.");
+    const length = Number(response.headers.get("content-length"));
+    need(!Number.isFinite(length) || length <= limit, "LIMIT", "HTTP response exceeds byte limit.");
+    const parts = [];
+    let size = 0;
+    if (response.body) {
+      const reader = response.body.getReader();
+      while (true) {
+        idle = setTimeout(() => abort("IDLE_TIMEOUT"), idleMs);
+        const part = await reader.read();
+        clearTimeout(idle);
+        if (part.done)
+          break;
+        size += part.value.length;
+        need(size <= limit, "LIMIT", "HTTP response exceeds byte limit.");
+        parts.push(part.value);
+        if (Date.now() - lastProgress >= 1000) {
+          policy.onProgress?.({ received_bytes: size, elapsed_ms: Date.now() - started });
+          lastProgress = Date.now();
+        }
+      }
+    }
+    return { status: response.status, headers: response.headers, data: Buffer.concat(parts, size) };
+  } catch (error) {
+    controller.abort();
+    if (error instanceof BridgeError)
+      throw error;
+    if (reason)
+      throw new BridgeError(reason, reason === "CANCELLED" ? "Transfer cancelled; completed parts are retained." : "Transfer stopped after its idle, header or size-aware deadline; completed parts are retained.");
+    if (/CERT|TLS|SSL/.test(String(error?.code || "")))
+      throw new BridgeError("TLS", "Relay TLS verification failed.");
+    throw new BridgeError("NETWORK", "Relay connection or response was interrupted.");
+  } finally {
+    clearTimeout(total);
+    clearTimeout(headers);
+    clearTimeout(idle);
+    options.signal?.removeEventListener("abort", external);
+  }
+};
+function withRetries(request, defaults = {}) {
+  return async (url, options = {}, limit = LIMIT.meta, override = {}) => {
+    const policy = { ...defaults, ...override }, attempts = policy.attempts ?? 4;
+    need(Number.isSafeInteger(attempts) && attempts >= 1 && attempts <= 6, "ARGUMENT", "Retry attempts must be between 1 and 6.");
+    for (let attempt = 0;attempt < attempts; attempt++) {
+      let delay = Math.min(8000, 400 * 2 ** attempt);
+      try {
+        const response = await request(url, options, limit, policy);
+        if (!transient.has(response.status) || attempt + 1 === attempts)
+          return response;
+        const retry = response.headers.get("retry-after");
+        if (retry) {
+          const wait = /^\d+$/.test(retry) ? Number(retry) * 1000 : Date.parse(retry) - Date.now();
+          if (wait > 30000)
+            throw new BridgeError("RETRY_LATER", "The relay requested a longer backoff; retry later with the same output/cache directory.");
+          if (Number.isFinite(wait))
+            delay = Math.max(delay, wait);
+        }
+      } catch (error) {
+        if (!(error instanceof BridgeError) || !["NETWORK", "IDLE_TIMEOUT", "HEADER_TIMEOUT", "TRANSFER_TIMEOUT"].includes(error.code) || attempt + 1 === attempts)
+          throw error;
+      }
+      await (policy.sleep || pause)(delay);
+    }
+    throw new BridgeError("NETWORK", "Retry budget exhausted.");
+  };
+}
+var http = withRetries(httpOnce);
+
 // bun-src/relay.ts
 var PROVIDERS = {
   filebin: { endpoint: "https://filebin.net", hosts: ["filebin.net", "storage.filebin.net"], ttls: ["provider-default"] },
   litterbox: { endpoint: "https://litterbox.catbox.moe/resources/internals/api.php", hosts: ["litterbox.catbox.moe", "litter.catbox.moe"], ttls: ["1h", "12h", "24h", "72h"] },
-  tmpfiles: { endpoint: "https://tmpfiles.org/api/v1/upload", hosts: ["tmpfiles.org"], ttls: ["1h", "6h", "24h", "48h"] }
+  tmpfiles: { endpoint: "https://tmpfiles.org/api/v1/upload", hosts: ["tmpfiles.org"], ttls: ["1h", "6h", "24h", "48h"] },
+  tempsh: { endpoint: "https://temp.sh/upload", hosts: ["temp.sh"], ttls: ["provider-default"] },
+  uguu: { endpoint: "https://uguu.se/upload", hosts: ["uguu.se", "a.uguu.se", "files.uguu.se"], ttls: ["provider-default"] }
 };
 var IDENTITY = /^AGE-SECRET-KEY-1[0-9A-Z]{40,100}$/;
 var MAGIC = Buffer.from(`age-encryption.org/v1
@@ -17015,48 +17115,25 @@ function validateURL(url, provider) {
     throw new BridgeError("URL", "Invalid URL.");
   }
   need(u.protocol === "https:" && PROVIDERS[provider].hosts.includes(u.hostname) && ["", "443"].includes(u.port) && !u.username && !u.password && !u.hash, "URL", "URL outside selected provider's HTTPS allowlist.");
+  if (provider === "tempsh")
+    need(/^\/[A-Za-z0-9]{1,80}\/[A-Za-z0-9][A-Za-z0-9._-]{0,180}$/.test(u.pathname) && !u.search, "URL", "Expected a Temp.sh file locator, not an upload/control endpoint.");
   return url;
 }
-var http = async (url, options = {}, limit = LIMIT.meta) => {
-  let response;
-  try {
-    response = await fetch(url, { ...options, redirect: "manual", signal: AbortSignal.timeout(60000), headers: { "User-Agent": "session-bridge/" + VERSION, ...Object.fromEntries(new Headers(options.headers)) } });
-  } catch {
-    throw new BridgeError("NETWORK", "Relay connection or TLS verification failed.");
-  }
-  const chunks = [];
-  let size = 0;
-  if (response.body) {
-    const reader = response.body.getReader();
-    try {
-      while (true) {
-        const part = await reader.read();
-        if (part.done)
-          break;
-        size += part.value.length;
-        if (size > limit) {
-          await reader.cancel();
-          throw new BridgeError("LIMIT", "HTTP response exceeds byte limit.");
-        }
-        chunks.push(part.value);
-      }
-    } catch (e) {
-      if (e instanceof BridgeError)
-        throw e;
-      throw new BridgeError("NETWORK", "Relay response was interrupted.");
-    }
-  }
-  return { status: response.status, headers: response.headers, data: Buffer.concat(chunks) };
-};
 async function download(url, provider, bytes, sha, request = http) {
   validateURL(url, provider);
   need(Number.isSafeInteger(bytes) && bytes > 0 && bytes <= LIMIT.archive && isHash(sha), "TRANSFER", "Invalid ciphertext size/hash.");
+  const r = await downloadResponse(url, provider, bytes, request);
+  need(r.status === 200, "HTTP_STATUS", `Relay download returned HTTP ${r.status}.`);
+  need(r.data.length === bytes && hash(r.data) === sha, "HASH_MISMATCH", "Downloaded ciphertext differs from source.");
+  return r.data;
+}
+async function downloadResponse(url, provider, bytes, request, extraHeaders = {}) {
   let current = url, cookie = "", replayed = false;
   for (let i = 0;i < 5; i++) {
-    const headers = {};
+    const headers = { ...extraHeaders };
     if (provider === "filebin" && new URL(current).hostname === "filebin.net" && cookie)
       headers.Cookie = cookie;
-    const r = await request(current, { headers }, provider === "filebin" ? Math.max(bytes, 16384) : bytes);
+    const r = await request(current, { headers, ...provider === "tempsh" ? { method: "POST" } : {} }, Math.max(bytes, 16384), { totalMs: Math.min(1800000, Math.max(120000, Math.ceil(bytes / 4096) * 1000 + 60000)) });
     if ([301, 302, 303, 307, 308].includes(r.status)) {
       current = validateURL(new URL(r.headers.get("location") || "", current).href, provider);
       continue;
@@ -17067,12 +17144,27 @@ async function download(url, provider, bytes, sha, request = http) {
       replayed = true;
       continue;
     }
-    need(r.status === 200, "HTTP_STATUS", `Relay download returned HTTP ${r.status}.`);
+    need(r.status === 200 || r.status === 206, "HTTP_STATUS", `Relay download returned HTTP ${r.status}.`);
     need(!html, "HTML_RESPONSE", "Relay returned HTML instead of ciphertext.");
-    need(r.data.length === bytes && hash(r.data) === sha, "HASH_MISMATCH", "Downloaded ciphertext differs from source.");
-    return r.data;
+    return r;
   }
   throw new BridgeError("REDIRECT", "Too many relay redirects.");
+}
+async function downloadRange(url, provider, start, end, total, request = http) {
+  validateURL(url, provider);
+  need(Number.isSafeInteger(start) && Number.isSafeInteger(end) && Number.isSafeInteger(total) && start >= 0 && end >= start && end < total && total <= LIMIT.archive, "TRANSFER", "Invalid ciphertext range.");
+  let result;
+  try {
+    result = await downloadResponse(url, provider, end - start + 1, request, { Range: `bytes=${start}-${end}`, "Accept-Encoding": "identity" });
+  } catch (error) {
+    if (error instanceof BridgeError && error.code === "LIMIT")
+      throw new BridgeError("RANGE_UNSUPPORTED", "The relay ignored a bounded range request.");
+    throw error;
+  }
+  need(result.status !== 200, "RANGE_UNSUPPORTED", "The relay returned a full object to a range request.");
+  need(result.status === 206, "HTTP_STATUS", `Relay range download returned HTTP ${result.status}.`);
+  need(result.headers.get("content-range") === `bytes ${start}-${end}/${total}` && result.data.length === end - start + 1, "RANGE_RESPONSE", "Relay returned the wrong ciphertext range.");
+  return result.data;
 }
 async function upload(cipher, provider, ttl, request = http) {
   need(Object.hasOwn(PROVIDERS, provider) && PROVIDERS[provider].ttls.includes(ttl), "TTL", "Unsupported provider or retention period.");
@@ -17080,22 +17172,41 @@ async function upload(cipher, provider, ttl, request = http) {
   const filename = uuid().replaceAll("-", "") + ".session.age";
   if (provider === "filebin") {
     const url2 = `https://filebin.net/${uuid().replaceAll("-", "")}/${filename}`;
-    const r2 = await request(url2, { method: "POST", headers: { "Content-Type": "application/octet-stream", Accept: "application/json" }, body: cipher });
+    const r2 = await request(url2, { method: "POST", headers: { "Content-Type": "application/octet-stream", Accept: "application/json" }, body: cipher }, LIMIT.meta, { totalMs: Math.min(1800000, Math.max(120000, Math.ceil(cipher.length / 4096) * 1000 + 60000)) });
+    if (r2.status === 409) {
+      await download(url2, provider, cipher.length, hash(cipher), request);
+      return {
+        provider,
+        download_url: url2,
+        uploaded_at: now(),
+        requested_ttl: ttl,
+        reported_expires_at: null,
+        estimated_expires_at: new Date(Date.now() + 7 * 86400000).toISOString(),
+        expiry_basis: "estimated_after_acknowledgement_loss",
+        deletion_support: "url-capability",
+        locator_also_allows_delete: true
+      };
+    }
     need(r2.status === 201, "HTTP_STATUS", `Filebin upload returned HTTP ${r2.status}; no ready prompt.`);
     const v = parseJSON(r2.data);
     need(v?.file?.sha256 === hash(cipher) && v?.file?.bytes === cipher.length && typeof v?.bin?.expired_at === "string" && Number.isFinite(Date.parse(v.bin.expired_at)), "PROVIDER_RESPONSE", "Filebin metadata differs from ciphertext.");
     return { provider, download_url: url2, uploaded_at: now(), requested_ttl: ttl, reported_expires_at: v.bin.expired_at, estimated_expires_at: null, expiry_basis: "provider_response", deletion_support: "url-capability", locator_also_allows_delete: true };
   }
   const form = new FormData;
-  form.append(provider === "litterbox" ? "fileToUpload" : "file", new Blob([cipher], { type: "application/octet-stream" }), filename);
+  form.append(provider === "litterbox" ? "fileToUpload" : provider === "uguu" ? "files[]" : "file", new Blob([cipher], { type: "application/octet-stream" }), filename);
   if (provider === "litterbox") {
     form.append("reqtype", "fileupload");
     form.append("time", ttl);
   } else
     form.append("expire", String(parseInt(ttl) * 3600));
-  const r = await request(PROVIDERS[provider].endpoint, { method: "POST", body: form });
+  const r = await request(PROVIDERS[provider].endpoint, { method: "POST", body: form }, LIMIT.meta, { totalMs: Math.min(1800000, Math.max(120000, Math.ceil(cipher.length / 4096) * 1000 + 60000)) });
   need([200, 201].includes(r.status), "HTTP_STATUS", `Relay upload returned HTTP ${r.status}; no ready prompt.`);
   let url = r.data.toString("utf8").trim();
+  if (provider === "uguu") {
+    const v = parseJSON(r.data);
+    need(v?.success === true && v.files?.length === 1 && typeof v.files[0].url === "string", "PROVIDER_RESPONSE", "No Uguu upload confirmation.");
+    url = v.files[0].url;
+  }
   if (provider === "tmpfiles") {
     const v = parseJSON(r.data);
     need(v?.status === "success", "PROVIDER_RESPONSE", "No upload confirmation.");
@@ -17110,8 +17221,8 @@ async function upload(cipher, provider, ttl, request = http) {
     uploaded_at: now(),
     requested_ttl: ttl,
     reported_expires_at: null,
-    estimated_expires_at: new Date(Date.now() + parseInt(ttl) * 3600000).toISOString(),
-    expiry_basis: "estimated_from_requested_ttl",
+    estimated_expires_at: new Date(Date.now() + (provider === "tempsh" ? 72 : provider === "uguu" ? 3 : parseInt(ttl)) * 3600000).toISOString(),
+    expiry_basis: "estimated_from_provider_policy",
     deletion_support: "unsupported"
   };
 }
@@ -17218,13 +17329,13 @@ description: Transfer agent tasks between harnesses with history, attachments, w
 license: MIT
 compatibility: Requires Windows x64 or macOS 13+, file access and command execution. Network access is needed for public transfers. Standalone executables include the runtime.
 metadata:
-  version: "0.5.2"
+  version: "0.6.0"
   repository: "https://github.com/lyzMaster/session-bridge"
 ---
 
 # Session Bridge
 
-Executable v0.5.2. Project and first-use guide: https://github.com/lyzMaster/session-bridge / INSTALL.md. In this installed Skill directory, run \`./session-bridge\` on macOS or \`& '.\\session-bridge.exe'\` in Windows PowerShell; use an absolute executable path from other working directories. The one executable embeds Bun, age-compatible encryption, HTTP, ZIP, these instructions and the vercel-labs/skills 1.9.0 library. No separately installed Bun, Node, Python, age, Git, npm packages or DLL sidecars are needed. \`doctor\` checks the local runtime without network/session access. The optional source distribution runs with \`bun --no-install scripts/session-bridge.ts\` and needs Bun >=1.3.6.
+Executable v0.6.0. Project and first-use guide: https://github.com/lyzMaster/session-bridge / INSTALL.md. In this installed Skill directory, run \`./session-bridge\` on macOS or \`& '.\\session-bridge.exe'\` in Windows PowerShell; use an absolute executable path from other working directories. Multipart transfers require doctor.compatibility.transfer_versions to include 2. When upgrading for this capability, run install --require-transfer-version 2; it backs up older managed installations and reuses compatible ones. The one executable embeds Bun, age-compatible encryption, HTTP, ZIP, these instructions and the vercel-labs/skills 1.9.0 library. No separately installed Bun, Node, Python, age, Git, npm packages or DLL sidecars are needed. \`doctor\` checks the local runtime without network/session access. The optional source distribution runs with \`bun --no-install scripts/session-bridge.ts\` and needs Bun >=1.3.6.
 
 ## Install or reuse
 
@@ -17239,19 +17350,19 @@ Read [commands](references/commands.md) for the selected mode, [bundle/Skill sem
 1. Identify the selected session and workspace roots without guessing from recency. Write HANDOFF.md and state JSON with \`goal\` and \`next_action\`. Retain latest corrections, acceptance criteria, progress, decisions/reasons, evidence and external effects. Supply available original history; distinguish it from summaries. Disclose missing history when completeness was requested.
 2. Run \`prepare\` with explicit history, handoff, state, roots and attachments. Staging must be outside captured roots. The helper automatically discovers used Skills from concrete tool reads of SKILL.md, structured skill-use records and explicit invocations. Available-skill catalogs only resolve references; they do not count as usage. It captures full selected folders, scripts/resources, declared cross-Skill dependencies, content hashes and provenance. Inspect \`reports/skills.json\` for missing/ambiguous references and \`reports/omissions.jsonl\` for excluded files. Use \`--skill-root\` for other registries, \`--skill <path-or-name>\` for known evidence the source format cannot expose, and \`--strict-skills\` if unresolved references must fail the export. Never guess a version or claim exhaustive discovery from incomplete history.
 3. Inspect coverage and omissions, then \`pack\`. Known credential filenames, caches and symlinks are excluded with records. Recognized private-key/token content blocks packaging; detection is heuristic. Keep live transfer prompts/identities outside captured roots and explicitly redact old credentials from supplied history, recording transformations.
-4. For public sharing run \`share\` with explicit provider/TTL. It encrypts locally with a new age identity, uploads only ciphertext under a random name, independently downloads and hashes it, then writes \`continuation-prompt.txt\`. Only \`prompt_ready\` means success. Never upload plaintext, silently switch websites or bypass rejected requests. Filebin is the verified option: \`--provider filebin --ttl provider-default\`; it reports approximately seven days, not a guaranteed 24h.
+4. For public sharing, default to \`share --provider auto --ttl provider-default\`. It uses the first real encrypted part (up to 256 KiB) to race Filebin and Temp.sh upload/readback verification from the current network, then selects the first verified route. Parts default to at most 8 MiB and 3 workers; slow measured links shrink parts (down to 256 KiB) and may use up to 6 workers. Explicit settings stay pinned. Every part is independently age-encrypted and hash-verified. A small encrypted manifest keeps the target prompt short. It writes continuation-prompt.txt only after every part and the manifest pass verification. Only \`prompt_ready\` means success. Only encrypted bytes go to the advertised auto candidates; the age identity stays local. Explicit --provider pins a site. Respect rate-limit backoff and do not bypass rejections or change User-Agent to evade them. Filebin reports roughly seven days; Temp.sh policy is three days (estimated). See providers.md for actual limits. On network failure, use resume-share --out <same-directory> or repeat the same share command; preserve the original ZIP, key and checkpoint. Completed verified parts are reused. Auto mode remeasures after a network-interface/proxy change or failed transfer. Prefer asynchronous command execution/polling when the harness supports it. If its command deadline kills the CLI, resume while verified progress increases; stop after two consecutive no-progress attempts or permanent denial. Do not re-export, regenerate identity or edit installed code/timeouts. A previously uploaded v1 payload can also finish cached, parallel Range readback with resume-share and its original local receipt/ciphertext/key, without re-uploading it.
 5. Return one short, copyable target prompt: a sentence asking to restore and continue, this project's GitHub address, and the complete transfer block with its JSON on one line. Omit installation steps, commands and protocol explanations; INSTALL.md and this Skill supply those details. When reusing an older compatible CLI with a verbose template, keep its transfer data unchanged, compact the JSON, and replace the surrounding prose with this short wrapper. Download capability and decryption identity intentionally travel together. Do not repeat the identity in diagnostics or send it to the relay. Briefly report actual expiry and consequential gaps separately when needed. \`revoke --receipt\` deletes an owned Filebin entry and checks for 404; it cannot erase downloaded copies or prove physical erasure.
 
 ## Receive, make Skills usable and continue
 
-1. Save the prompt or its single \`<session-bridge-transfer>\` JSON block to a new private local file, or use stdin. Never place the private identity in command arguments. Run \`receive --transfer-file <file> --dest <new-directory>\`. If the target harness's Skill directory is known, add \`--skills-dir <directory>\` to register recovered dependencies as part of import.
+1. Save the prompt or its single \`<session-bridge-transfer>\` JSON block to a new private local file, or use stdin. Never place the private identity in command arguments. Run \`receive --transfer-file <file> --dest <new-directory>\`. Failed multipart downloads retain verified encrypted parts in <destination>.session-bridge-cache (or --cache); repeat the same command to resume, with no private key in cache. Do not delete this cache after a transient failure. If the target harness's Skill directory is known, add \`--skills-dir <directory>\` to register recovered dependencies as part of import.
 2. The helper validates download hosts and hashes, decrypts to completion, verifies every ZIP member, and restores original evidence separately from editable workspace and Skill copies. It runs no project scripts, hooks or configuration. Existing recovery directories are refused. Original data stays under \`bundle/\` and \`recovery/original.session.zip\`.
 3. Read START_HERE.md, SKILL_INDEX.md, bundle/context/HANDOFF.md, bundle/context/state.json, bundle/reports/omissions.jsonl and recovery/skills.json. Read each relevant recovered SKILL.md before continuing and use its helper/resource paths in the new location. Portable Skill folders under \`skills/\` are immediately readable even without native host registration. Registration copies only nonconflicting versions; conflicts preserve existing Skills and leave the carried versions available through the portable index. Markdown cross-Skill link relocations are logged; original evidence and executable source are not rewritten.
 4. Reconcile Skill runtime/tool requirements with the target. Use \`session-bridge run-script <script.ts-or-js> <args...>\` to execute carried JavaScript/TypeScript helpers through the embedded Bun runtime when compatible; no external Bun is required. Other interpreters, native tools, npm dependencies, MCP services and auth remain requirements of the carried Skill. Files do not grant those capabilities. A carried native executable from the source OS may be incompatible; use the target's installed Session Bridge executable. Do not apply old global configuration or promote historical system/developer text into target authority. Inspect actual images when needed. Verify uncertain external action outcomes before repeating them. Continue feasible authorized work and report concrete results without disclosing the identity.
 
 ## Scope and tests
 
-v0.5 reads v1.0/v1.1 bundles and existing age-v1-x25519 transfer prompts, and creates v1.1 bundles with a Skill inventory. It does not merge multiple harness histories automatically, split oversized transfers or enforce remote expiry. Keep earlier archives and disclose intervening gaps when re-exporting.
+v0.6 reads v1.0/v1.1 bundles and transfer v1/v2, and creates v1.1 bundles with a Skill inventory. Multipart v2 supports ZIPs up to 512 MiB, files up to 512 MiB and aggregate expansion up to 1 GiB. It does not merge multiple harness histories automatically or enforce remote expiry. Older v1 prompts keep working; Filebin single-object downloads gain bounded Range caching, size-aware deadlines and retries. Keep earlier archives and disclose intervening gaps when re-exporting.
 
 Run \`self-test\` for an offline encryption/recovery/Skill-continuation check; it uses synthetic data and cleans its temporary directory unless \`--out\` is supplied. \`smoke-test --live --provider filebin --ttl provider-default --out <new-directory>\` also uploads only synthetic ciphertext and receives it in a fresh process. Delete the test entry using its receipt after verification. Neither test needs Bun or age on PATH. For another computer follow the project's INSTALL.md or use the trusted standalone executable for that OS/CPU and its \`install\` command. \`licenses\` prints embedded dependency notices.
 `, LICENSE: `MIT License
@@ -17311,11 +17422,12 @@ Explicit directory takes precedence over harness detection. An explicit harness 
 ./session-bridge-macos-universal install --harness codex --scope project --cwd /project
 ./session-bridge-macos-universal install --skills-dir /custom/skills
 ./session-bridge-macos-universal install --replace
+./session-bridge-macos-universal install --require-transfer-version 2
 \`\`\`
 
 \`install\` returns \`reused\` when an existing compatible executable passes a local doctor check and its managed files match the integrity receipt; it does not rewrite files. A legacy native v0.3 install without a receipt can be reused after a health check. A damaged managed install is backed up and repaired. \`--replace\` explicitly upgrades even a healthy version. The candidate is copied/validated through the embedded skills API before touching the existing directory; replacement preserves a sibling \`skill-backups/session-bridge-...\` backup. A failed candidate keeps the old version. Healthy shared Skills reached through a registry link can be reused, but replacement/repair through a link and unrelated Skill folders are refused. Library operations are local-only, copy mode, telemetry disabled, with no package manager, Git or upstream lock writes.
 
-Installing creates SKILL.md, references, license notices, one executable and an \`installation.json\` receipt. Refresh the host Skill catalog if needed, or directly read the installed SKILL.md for the current task. Reusing does not force an upgrade or make a network request.
+Multipart transfers require doctor.compatibility.transfer_versions to include 2. \`install --require-transfer-version 2\` backs up and upgrades a healthy older installation that lacks that capability; compatible versions are still reused. Installing creates SKILL.md, references, license notices, one executable and an \`installation.json\` receipt. Refresh the catalog if needed, or read installed SKILL.md directly. Reuse makes no network request.
 
 The remaining POSIX examples run inside the installed Skill folder. In PowerShell replace \`./session-bridge\` with \`& '.\\session-bridge.exe'\`; pass the same arguments on one line and use Windows paths. From elsewhere use the absolute executable path. Explicitly installing creates Skill files; the executable itself needs no sidecar files.
 
@@ -17350,7 +17462,7 @@ Selected folders include SKILL.md, scripts, assets, references, agent metadata a
 
 \`\`\`sh
 ./session-bridge share /transfer/task.session.zip \\
-  --provider filebin --ttl provider-default --out /transfer/shared
+  --provider auto --ttl provider-default --out /transfer/shared
 ./session-bridge receive --transfer-file /transfer/continuation-prompt.txt \\
   --dest /new/recovery --skills-dir /path/to/target-harness/skills
 \`\`\`
@@ -17361,7 +17473,20 @@ Windows import example:
 & "$env:USERPROFILE\\.codex\\skills\\session-bridge\\session-bridge.exe" receive --transfer-file 'C:\\handoff\\continuation-prompt.txt' --dest 'C:\\work\\recovered'
 \`\`\`
 
-Share encrypts locally, uploads only randomized ciphertext and verifies a fresh download before producing the copyable secret prompt. Stdout omits the private key. Keep share files outside future snapshots. Receive accepts \`--transfer-file -\` for stdin; never put the identity in command arguments. Filebin's reported default expiry is approximately seven days. Expiry/deletion cannot retract downloaded copies.
+Auto measures actual encrypted upload/readback to Filebin and Temp.sh from the current network, selects the first verified route, and reuses that upload. Pin a site with \`--provider filebin\` or \`--provider tempsh\`. The first part is at most 256 KiB; later parts default to at most 8 MiB with 3 workers, adapting down to 256 KiB and up to 6 workers on slow measured links. \`--part-mib 1..16\` and \`--concurrency 1..6\` override those bounds. Every part and the small manifest are age-encrypted and independently verified; only \`prompt_ready\` means success. Stdout omits the private identity; stderr reports safe progress without keys or URLs.
+
+Keep the ZIP, identity and checkpoint outside future snapshots. After interruption repeat the same share command/output, or run:
+
+\`\`\`sh
+./session-bridge resume-share --out /transfer/shared
+./session-bridge receive --transfer-file /transfer/continuation-prompt.txt --dest /new/recovery
+\`\`\`
+
+Source resume skips verified uploads and finishes accepted-but-unverified readbacks. It can also finish readback of an older \`payload.session.zip.age\` using its existing receipt/key without re-uploading it. Target v2 retains verified encrypted parts in \`/new/recovery.session-bridge-cache\` after failure and skips them next time. \`--cache <private-directory>\` chooses another separate cache. Success removes the managed cache; failure creates no partial recovery directory. Legacy v1 Filebin downloads also gain 256 KiB Range caches; servers without range support use the bounded, hash-checked full-object path.
+
+Use asynchronous command execution/polling when the harness supports it. If its overall deadline kills the process, resume the same checkpoint; do not re-export, regenerate keys or edit the installed code. Native HTTP retries transient failures up to 4 times with backoff. Active reads reset a 45-second idle timer, with a separate size-aware total deadline. HTTPS, hashes and age authentication remain required.
+
+Receive accepts \`--transfer-file -\` for stdin; never put the identity in process arguments. Filebin reports its expiry, commonly about seven days; Temp.sh's three-day policy is an estimate. The earliest primary-object expiry bounds a multipart transfer. Expiry/deletion cannot retract downloaded copies.
 
 Import creates separate original evidence, editable projects and usable Skills:
 
@@ -17397,9 +17522,10 @@ Script arguments pass through, including \`--options\`. Restore itself never run
 ./session-bridge verify /transfer/task.session.zip
 ./session-bridge unpack /transfer/task.session.zip --dest /new/recovery
 ./session-bridge revoke --receipt /transfer/shared/upload-receipt.json
+./session-bridge revoke --receipt /transfer/shared/checkpoint.json
 ./session-bridge self-test
 ./session-bridge self-test --out /new/offline-test
-./session-bridge smoke-test --live --provider filebin --ttl provider-default --out /new/live-test
+./session-bridge smoke-test --live --provider auto --ttl provider-default --fixture-mib 95 --out /new/live-test
 ./session-bridge licenses
 ./session-bridge package --out /release/session-bridge-native-skill.zip
 \`\`\`
@@ -17408,10 +17534,10 @@ Script arguments pass through, including \`--options\`. Restore itself never run
 
 \`package\` creates an optional Skill ZIP containing this executable and embedded documents for the same OS/CPU; transferring the single executable and running \`install\` is sufficient. Build/test tooling and node_modules are not needed on receiving machines. Development checks: \`bun run test\` from the source repository.
 
-Limits: 100 MB compressed ZIP/ciphertext, 128 MiB per expanded file, 256 MiB aggregate expansion, 10,000 entries, 8 MiB metadata. Empty directories, symlinks, Git index/history and ownership/ACLs are not preserved. Files/executable bits are preserved where supported; POSIX permissions are not a Windows ACL guarantee. No automatic splitting.
-`, "references/protocol.md": `# Bundle v1.1, transfer v1
+Limits: 512 MiB ZIP, 512 MiB per expanded file, 1 GiB aggregate expansion, 10,000 entries, 8 MiB metadata and 2,048 parts. Large ZIPs automatically split into bounded encrypted objects; local ZIP building still has explicit memory/expansion limits. Empty directories, symlinks, Git index/history and ownership/ACLs are not preserved. Files/executable bits are preserved where supported; POSIX permissions are not a Windows ACL guarantee.
+`, "references/protocol.md": `# Bundle v1.1, transfer v1/v2
 
-The v0.3 standalone implementation creates ZIP32 bundles with STORE/DEFLATE support and reads previous v1.0 session bundles. Bun and encryption are embedded. It uses built-in zlib/CRC32, bounded expansion, strict path/member validation and no system extraction command. Limits: 100 MB ZIP/ciphertext, 128 MiB file, 256 MiB total expansion, 10,000 files, 8 MiB metadata. The file limit permits a bundled native Skill executable; compressed archives must still fit the separate transfer limit. Unsupported ZIP encryption, ZIP64, links, special files, case/Unicode aliases, duplicate paths, absolute/traversal names and overlapping ZIP members are refused.
+The v0.6 standalone implementation creates ZIP32 bundles with STORE/DEFLATE support and reads previous v1.0 session bundles. Bun and encryption are embedded. It uses built-in zlib/CRC32, bounded expansion, strict path/member validation and no system extraction command. Limits: 512 MiB ZIP, 512 MiB file, 1 GiB total expansion, 10,000 files and 8 MiB metadata. Unsupported ZIP encryption, ZIP64, links, special files, case/Unicode aliases, duplicate paths, absolute/traversal names and overlapping ZIP members are refused.
 
 All extraction comes from one stable input byte snapshot, so replacing the external ZIP after validation cannot introduce new write paths. Original evidence is read-only on POSIX; working projects and usable Skill copies are separate. Inventory accounts for every member except manifest/inventory themselves, with lengths, SHA-256 and executable bits. No setup code runs during validation/extraction.
 
@@ -17434,10 +17560,51 @@ Receive creates \`skills/<name>/\` (or version IDs for name collisions), SKILL_I
 
 The rest of the bundle preserves context/HANDOFF.md, state.json, references, original history bytes, normalized source_document events, workspace trees and omission/redaction reports. Generic history capture never fabricates original roles/tool calls. Coverage remains partial/unknown where full host records cannot be enumerated.
 
-The secret transfer JSON is delimited by \`<session-bridge-transfer>\` tags. It contains version=1, provider, stable download URL, bundle ID, ciphertext length/hash, encryption=age-v1-x25519, private identity, expiry reports/estimates and delete_after_restore=false. Keys come from the cryptographic RNG through age-encryption, not a model. The embedded [age-encryption](https://github.com/FiloSottile/typage) library implements the existing age format; v0.1/v0.2 prompts/archives remain compatible. No age/age-keygen process is launched. HTTP requests never contain the private identity. The whole prompt is a bearer secret, and enters the source/target chat histories by user choice.
+The secret transfer JSON is delimited by \`<session-bridge-transfer>\` tags. It contains version=1 or 2, provider, stable download URL, bundle ID, ciphertext length/hash, encryption=age-v1-x25519, private identity, expiry reports/estimates and delete_after_restore=false. Keys come from the cryptographic RNG through age-encryption, not a model. The embedded [age-encryption](https://github.com/FiloSottile/typage) library implements the existing age format; old prompts/archives remain compatible. No age/age-keygen process is launched. HTTP requests never contain the private identity. The whole prompt is a bearer secret, and enters source/target chat histories by user choice.
+
+For v1 the ciphertext is one ZIP. For v2 it is a small encrypted part manifest, keeping the prompt short regardless of part count. The manifest binds the bundle ID, whole archive length/SHA-256, and an ordered list of parts. Each part binds an allowlisted HTTPS provider/URL, ciphertext length/hash and plaintext length/hash. The entire manifest is validated before fetching parts: indexes must be consecutive, URLs unique, lengths bounded, and the sum must equal archive size. Use v2 for bundles exceeding legacy expansion limits even when only one part is needed.
+
+Each part is a complete, independently randomized age file using the same recipient identity, not a plaintext fragment. Source checkpoints save accepted receipts before readback and atomically mark verified parts. No prompt is ready until all required parts and the manifest pass independent readback. Target caches contain verified ciphertext; the identity is not copied to cache or recovery reports. Parts authenticate independently, then the assembled ZIP's complete SHA-256 and existing inventory are validated before destination commit. Interrupted downloads, missing parts and hash errors never publish a partial recovery directory.
 
 Hashes validate bytes relative to a trusted copied prompt, not the sender's identity if the whole prompt is replaced. age authenticates decrypted bytes. Neither an expiry string nor deleting a remote entry retracts downloaded copies. Private keys/tokens in earlier prompts need explicit redaction before re-exporting histories; heuristic content detection is not a guarantee of secret-free content.
-`, "references/providers.md": "# Public relay providers\n\nProvider and TTL must be explicit; no automatic fallback, renamed file types or restriction bypass. Only randomized names and age ciphertext are uploaded, but hosts still see lengths, IPs and timing. The standalone implementation uses its embedded runtime's native fetch, validates HTTPS hosts and limits every body; no curl is required.\n\n## Filebin\n\n[API](https://filebin.net/api), [specification](https://filebin.net/api.yaml), [terms](https://filebin.net/terms). Raw binary POST to a random bin/file returns length, SHA-256 and `bin.expired_at`; independent binary readback remains required. `--provider filebin --ttl provider-default` uses that reported expiry, currently approximately seven days. It cannot promise 24h.\n\nThe documented flow sets a verification cookie and then redirects on one replay to a short-lived storage URL. Only `filebin.net` and `storage.filebin.net` are allowed; the cookie is sent only to filebin.net. The stable original locator goes into the prompt, not the short-lived redirect. No JavaScript/challenge bypass is performed.\n\nThe original locator also grants delete capability. `revoke` sends DELETE then verifies the public entry returns 404. It cannot prove physical erasure or remove downloaded copies. Prior synthetic transfers passed; check current live test results before claiming availability, as storage/rate constraints may reject later requests.\n\n## Litterbox and tmpfiles (explicit alternatives, not guaranteed)\n\n[Litterbox official tools](https://litterbox.catbox.moe/tools.php) document anonymous multipart fileupload with 1h/12h/24h/72h. Allowed hosts: litterbox.catbox.moe and litter.catbox.moe. The URL reply provides no confirmed expiry timestamp; this adapter estimates it. Prior local uploads returned HTTP 412 Invalid uploader; do not bypass the rejection. No deletion is implemented.\n\n[tmpfiles API](https://tmpfiles.org/api) exposes file upload with expiry seconds; this adapter offers 1h/6h/24h/48h. It resolves the returned share-page locator to the same-host direct download and verifies actual ciphertext. [Terms](https://tmpfiles.org/tos) prohibit commercial automation without permission. Prior local connections failed; current availability is not established. No deletion API is implemented and expiry is estimated.\n\nTempFile.org is not implemented because its [terms](https://tempfile.org/terms) require permission for automated use. Do not confuse a documented candidate with verified support.\n", "THIRD_PARTY_LICENSES.txt": `Session Bridge 0.5.2 \u2014 bundled third-party notices
+`, "references/providers.md": `# Public relay providers
+
+## Automatic selection from the current network
+
+\`--provider auto --ttl provider-default\` races Filebin and Temp.sh using the same first real encrypted part, capped at 256 KiB. Each candidate must complete both upload and independent hash-checked readback. The first verified roundtrip wins, and its upload is reused. Reachability alone is insufficient. Other accepted probe receipts remain in the private checkpoint; unsupported deletion means some probes may persist until expiry. No age identity, source filename or plaintext is uploaded.
+
+The checkpoint retains the selected route and a hash of local interface/proxy configuration, without logging addresses or proxy credentials. A network change or failed auto transfer triggers a new measurement when resumed. Verified parts stay reused across route changes; only incomplete parts move to the newly selected site. Explicit \`--provider\` pins a site.
+
+After the first sample, parts default to at most 8 MiB with 3 workers. Slow measured links shrink parts down to 256 KiB and may increase workers to 6; explicit settings override tuning. Parts and the small manifest are independently encrypted and verified. Transient network errors and HTTP 408/425/429/5xx retry up to four times with backoff/Retry-After. Permanent denials, bad hashes and TLS failures are not bypassed. Active downloads reset a 45-second idle timer; a separate size-aware total deadline replaces the old fixed 60 seconds.
+
+Only randomized names and age ciphertext reach the advertised auto candidates. Providers see lengths, IPs and timing. All requests use native embedded HTTP, HTTPS host allowlists and bounded bodies. Speed depends on the current network and service load; a successful probe does not promise future availability.
+
+## Filebin
+
+[API](https://filebin.net/api), [specification](https://filebin.net/api.yaml), [terms](https://filebin.net/terms). Raw binary POST to a random bin/file returns length, SHA-256 and \`bin.expired_at\`; independent binary readback remains required. \`--provider filebin --ttl provider-default\` uses that reported expiry, currently approximately seven days. It cannot promise 24h.
+
+The documented flow sets a verification cookie and then redirects on one replay to a short-lived storage URL. Only \`filebin.net\` and \`storage.filebin.net\` are allowed; the cookie is sent only to filebin.net. The stable original locator goes into the prompt, not the short-lived redirect. No JavaScript/challenge bypass is performed.
+
+The original locator also grants delete capability. Multipart \`revoke --receipt\` checks the matching local checkpoint and deletes all known owned Filebin objects, including manifests and accepted probes, then confirms 404. It reports unsupported objects separately. It cannot prove physical erasure or remove downloaded copies. Prior synthetic transfers passed; live routing still verifies bytes before selecting it.
+
+## Temp.sh
+
+[Official instructions](https://temp.sh/) document anonymous multipart upload to \`https://temp.sh/upload\`, a 4 GB service limit and a three-day expiry policy. The current share page has a POST download form; the adapter follows that form method on the same returned HTTPS URL. GET returns HTML and must not count as ciphertext. A synthetic encrypted upload and exact-byte readback have passed. Expiry is estimated from policy, not a confirmed server timestamp. No deletion API is implemented.
+
+## Uguu (explicit alternative)
+
+[API](https://uguu.se/api), [limits](https://uguu.se/), [FAQ](https://uguu.se/faq): anonymous \`files[]\` uploads, a 128 MiB limit and a three-hour expiry policy. Allowed download hosts are uguu.se, a.uguu.se and files.uguu.se. Recent live probes returned 502, so it is not an automatic candidate. Expiry is estimated; deletion is unsupported.
+
+## Litterbox and tmpfiles (explicit alternatives, not guaranteed)
+
+[Litterbox official tools](https://litterbox.catbox.moe/tools.php) document anonymous multipart fileupload with 1h/12h/24h/72h. Allowed hosts: litterbox.catbox.moe and litter.catbox.moe. The URL reply provides no confirmed expiry timestamp; this adapter estimates it. Prior local uploads returned HTTP 412 Invalid uploader; do not bypass the rejection. No deletion is implemented.
+
+[tmpfiles API](https://tmpfiles.org/api) exposes file upload with expiry seconds; this adapter offers 1h/6h/24h/48h. It resolves the returned share-page locator to the same-host direct download and verifies actual ciphertext. [Terms](https://tmpfiles.org/tos) prohibit commercial automation without permission. Prior local connections failed; current availability is not established. No deletion API is implemented and expiry is estimated.
+
+TempFile.org is not implemented because its [terms](https://tempfile.org/terms) require permission for automated use. Do not confuse a documented candidate with verified support.
+
+Gofile and Pixeldrain are not anonymous defaults: [Gofile](https://gofile.io/api) restricts listing/direct-link features to Premium; [Pixeldrain](https://pixeldrain.com/api) requires an upload API key. Do not silently add destinations beyond the documented auto policy.
+`, "THIRD_PARTY_LICENSES.txt": `Session Bridge 0.6.0 \u2014 bundled third-party notices
 
 Build/runtime sources: https://github.com/oven-sh/bun/tree/bun-v1.3.6
 Encryption sources: https://github.com/FiloSottile/typage/tree/v0.3.1
@@ -32201,7 +32368,7 @@ function executableAt(root) {
   const script = path9.join(root, "scripts/session-bridge.ts");
   return !STANDALONE && exists(script) ? { path: script, native: false } : null;
 }
-function health(root) {
+function health(root, requiredTransferVersion = 1) {
   try {
     need(fs9.statSync(root).isDirectory(), "INSTALL", "Expected a Skill directory.");
     need(skillMetadata(path9.join(root, "SKILL.md")).name === "session-bridge", "INSTALL", "Unexpected Skill identity.");
@@ -32223,7 +32390,8 @@ function health(root) {
     const compatible = compatibility ? compatibility.transfer_versions?.includes(1) && compatibility.read_bundle_versions?.includes("1.1") && compatibility.installation_receipt_version === 1 : /^0\.3\.[0-9]+$/.test(doctor2?.version || "");
     need(doctor2?.ready === true && (!STANDALONE || doctor2.standalone === true) && typeof doctor2.version === "string" && /^\d+\.\d+\.\d+$/.test(doctor2.version) && compatible && doctor2.crypto_format === "age-v1-x25519" && doctor2.age_install_required === false, "INSTALL", "Installed executable is incompatible or requires an external runtime.");
     return {
-      usable: true,
+      usable: requiredTransferVersion === 1 || compatibility?.transfer_versions?.includes(requiredTransferVersion) === true,
+      healthy: true,
       version: doctor2.version,
       standalone: exe.native,
       files: rows.length,
@@ -32259,7 +32427,9 @@ function reusedResult(root, previous, context = {}) {
 async function installSkill(source, skillsDir, replace = false, context = {}) {
   source = path9.resolve(source);
   need(skillMetadata(path9.join(source, "SKILL.md")).name === "session-bridge", "INSTALL", "Unexpected distribution identity.");
-  const parent = path9.resolve(skillsDir), target = path9.join(parent, "session-bridge"), previous = exists(target) ? health(target) : null;
+  const requiredTransferVersion = context.required_transfer_version || 1;
+  need([1, 2].includes(requiredTransferVersion), "INSTALL", "Required transfer version must be 1 or 2.");
+  const parent = path9.resolve(skillsDir), target = path9.join(parent, "session-bridge"), previous = exists(target) ? health(target, requiredTransferVersion) : null;
   if (previous?.usable && !replace)
     return reusedResult(target, previous, context);
   if (exists(target))
@@ -32286,7 +32456,7 @@ async function installSkill(source, skillsDir, replace = false, context = {}) {
     need(upstream.failed.length === 0 && upstream.installed.length === 1, "INSTALL", "Embedded skills installer did not produce one complete Skill.");
     const stage = path9.resolve(upstream.installed[0].path), expected = path9.join(workspace, ".agents/skills/session-bridge");
     need(stage === expected && hash(json(snapshot(stage))) === hash(json(rows)), "INSTALL", "Staged Skill differs from source distribution.");
-    const stagedHealth = health(stage);
+    const stagedHealth = health(stage, requiredTransferVersion);
     need(stagedHealth.usable, "INSTALL", "Staged executable failed validation; existing installation is retained.");
     const receipt = {
       format: "session-bridge-installation",
@@ -32309,7 +32479,7 @@ async function installSkill(source, skillsDir, replace = false, context = {}) {
     fs9.renameSync(stage, target);
     committed = true;
     return {
-      status: previous?.usable ? "upgraded" : previous ? "repaired" : "installed",
+      status: previous?.healthy ? "upgraded" : previous ? "repaired" : "installed",
       version: stagedHealth.version,
       path: target,
       backup,
@@ -32337,14 +32507,16 @@ async function installSkill(source, skillsDir, replace = false, context = {}) {
 async function installForHarness(source, options = {}) {
   const target = await resolveInstallTarget(options);
   let directory = target.skills_directory;
-  const context = { harness: target.harness, scope: target.scope, selection_basis: target.selection_basis };
+  const requiredTransferVersion = options.requireTransferVersion || 1;
+  need([1, 2].includes(requiredTransferVersion), "INSTALL", "Required transfer version must be 1 or 2.");
+  const context = { harness: target.harness, scope: target.scope, selection_basis: target.selection_basis, required_transfer_version: requiredTransferVersion };
   for (const dir of target.candidate_directories) {
     const existing = path9.join(dir, "session-bridge");
     if (!exists(existing))
       continue;
     directory = dir;
     if (!options.replace) {
-      const check = health(existing);
+      const check = health(existing, requiredTransferVersion);
       if (check.usable)
         return reusedResult(existing, check, context);
     }
@@ -32353,12 +32525,724 @@ async function installForHarness(source, options = {}) {
   return typeof source === "function" ? source(directory, context) : installSkill(source, directory, !!options.replace, context);
 }
 
+// bun-src/multipart.ts
+import fs10 from "fs";
+import path10 from "path";
+import os7 from "os";
+import { createHash as createHash3 } from "crypto";
+var TRANSFER_DEFAULTS = { part_bytes: 8 * 1024 ** 2, concurrency: 3, maximum_parts: 2048, providers: ["tempsh", "filebin"] };
+var MIN_CIPHER = 128;
+var MAX_PART = 17 * 1024 ** 2;
+function atomicJSON(file, value) {
+  const tmp = file + "." + uuid() + ".tmp";
+  writeJSON(tmp, value);
+  fs10.renameSync(tmp, file);
+}
+function checkedDirectory(directory) {
+  if (!exists(directory))
+    fs10.mkdirSync(directory, { recursive: true, mode: 448 });
+  need(!fs10.lstatSync(directory).isSymbolicLink() && fs10.lstatSync(directory).isDirectory(), "CACHE", "Transfer state must be an ordinary local directory.");
+  return directory;
+}
+function lock(directory) {
+  const file = path10.join(directory, ".transfer.lock");
+  if (exists(file)) {
+    const owner = readJSON(file);
+    need(owner?.format === "session-bridge-lock" && Number.isSafeInteger(owner.pid) && owner.pid > 0, "BUSY", "Unrecognized transfer lock.");
+    let running = true;
+    try {
+      process.kill(owner.pid, 0);
+    } catch (e) {
+      if (e.code === "ESRCH")
+        running = false;
+    }
+    need(!running, "BUSY", "Another process owns this transfer directory.");
+    remove(file);
+  }
+  writeJSON(file, { format: "session-bridge-lock", pid: process.pid });
+  return () => {
+    if (exists(file))
+      remove(file);
+  };
+}
+async function pool(items, concurrency, work) {
+  need(Number.isSafeInteger(concurrency) && concurrency >= 1 && concurrency <= 6, "ARGUMENT", "Concurrency must be between 1 and 6.");
+  let next = 0, failure2;
+  await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (!failure2 && next < items.length) {
+      const item = items[next++];
+      try {
+        await work(item);
+      } catch (e) {
+        failure2 ||= e;
+      }
+    }
+  }));
+  if (failure2)
+    throw failure2;
+}
+function validFile(file, bytes, sha) {
+  if (!Number.isSafeInteger(bytes) || bytes <= 0 || bytes > LIMIT.archive || !isHash(sha))
+    return false;
+  try {
+    return fs10.lstatSync(file).isFile() && !fs10.lstatSync(file).isSymbolicLink() && fs10.statSync(file).size === bytes && hash(readBytes(file, Math.max(MAX_PART, LIMIT.meta, bytes))) === sha;
+  } catch {
+    return false;
+  }
+}
+function tuneTransfer(archiveBytes, sampleBytes, readbackMs, requestedPartBytes, requestedConcurrency) {
+  const rate = sampleBytes * 1000 / Math.max(1, readbackMs);
+  const adaptiveBytes = Math.max(256 * 1024, Math.min(TRANSFER_DEFAULTS.part_bytes, 2 ** Math.floor(Math.log2(Math.max(1, rate * 40)))));
+  return {
+    partBytes: requestedPartBytes ?? adaptiveBytes,
+    concurrency: requestedConcurrency ?? (archiveBytes >= 16 * 1024 ** 2 && rate < 256 * 1024 ? 6 : TRANSFER_DEFAULTS.concurrency),
+    measured_readback_bytes_per_second: Math.round(rate)
+  };
+}
+function sourcePlan(file, partBytes, sampleBytes = Math.min(partBytes, 256 * 1024)) {
+  const bytes = readBytes(file, LIMIT.archive), info = verifyBytes(bytes), parts = [];
+  for (let offset = 0;offset < bytes.length; ) {
+    const size = parts.length === 0 ? sampleBytes : partBytes;
+    const data = bytes.subarray(offset, Math.min(bytes.length, offset + size));
+    parts.push({ index: parts.length, offset, plain_bytes: data.length, plain_sha256: hash(data) });
+    offset += data.length;
+  }
+  need(parts.length <= TRANSFER_DEFAULTS.maximum_parts, "LIMIT", "Too many transfer parts; choose a larger part size.");
+  return {
+    archive_bytes: bytes.length,
+    archive_sha256: hash(bytes),
+    bundle_id: info.bundle_id,
+    coverage: info.coverage,
+    requires_v2: parts.length > 1 || info.uncompressed_bytes > 256 * 1024 ** 2 || info.inventory.some((row) => row.bytes > 128 * 1024 ** 2),
+    parts
+  };
+}
+function readPart(file, part) {
+  const fd = fs10.openSync(file, fs10.constants.O_RDONLY | (fs10.constants.O_NOFOLLOW || 0)), data = Buffer.alloc(part.plain_bytes);
+  try {
+    need(fs10.fstatSync(fd).isFile(), "FILE", "Only ordinary archive files can be shared.");
+    let done = 0;
+    while (done < data.length) {
+      const n = fs10.readSync(fd, data, done, data.length - done, part.offset + done);
+      need(n > 0, "SOURCE_CHANGED", "Archive changed during transfer.");
+      done += n;
+    }
+  } finally {
+    fs10.closeSync(fd);
+  }
+  need(hash(data) === part.plain_sha256, "SOURCE_CHANGED", "Archive changed during transfer; existing completed parts are retained.");
+  return data;
+}
+async function seal(data, identity2) {
+  const e = new Encrypter;
+  e.addRecipient(await identityToRecipient(identity2));
+  return Buffer.from(await e.encrypt(data));
+}
+async function open2(data, identity2) {
+  try {
+    const d2 = new Decrypter;
+    d2.addIdentity(identity2);
+    return Buffer.from(await d2.decrypt(data));
+  } catch {
+    throw new BridgeError("CRYPTO", "Part authentication failed; no recovery directory was created.");
+  }
+}
+function earliest(receipts) {
+  const actual = receipts.map((r3) => r3.reported_expires_at).filter(Boolean), estimated = receipts.map((r3) => r3.estimated_expires_at).filter(Boolean);
+  const dates = [...actual, ...estimated].filter((s3) => Number.isFinite(Date.parse(s3))).sort((a2, b4) => Date.parse(a2) - Date.parse(b4));
+  return dates.length ? estimated.length ? { estimated_expires_at: dates[0] } : { reported_expires_at: dates[0] } : {};
+}
+function envelope(receipt, data, identity2, bundleId, version2) {
+  return {
+    version: version2,
+    provider: receipt.provider,
+    download_url: receipt.download_url,
+    ciphertext_bytes: data.bytes,
+    ciphertext_sha256: data.sha256,
+    bundle_id: bundleId,
+    encryption: "age-v1-x25519",
+    identity: identity2,
+    delete_after_restore: false,
+    ...earliest([receipt])
+  };
+}
+async function shareMultipart(file, provider = "auto", ttl = "provider-default", output, options = {}) {
+  const out = path10.resolve(output), stateFile = path10.join(out, "checkpoint.json"), saved = exists(stateFile) ? readJSON(stateFile) : null;
+  const configuredBytes = options.partBytes ?? TRANSFER_DEFAULTS.part_bytes;
+  let partBytes = saved?.part_bytes ?? configuredBytes, concurrency = options.concurrency ?? saved?.concurrency ?? TRANSFER_DEFAULTS.concurrency;
+  need(Number.isSafeInteger(partBytes) && partBytes >= 1024 && partBytes <= 16 * 1024 ** 2, "ARGUMENT", "Part size must be between 1 KiB and 16 MiB.");
+  need(Number.isSafeInteger(concurrency) && concurrency >= 1 && concurrency <= 6, "ARGUMENT", "Concurrency must be between 1 and 6.");
+  need(provider === "auto" || Object.hasOwn(PROVIDERS, provider), "PROVIDER", "Unknown relay provider.");
+  need(provider !== "auto" || ttl === "provider-default", "TTL", "Automatic relay selection uses provider-default retention.");
+  if (provider !== "auto")
+    need(PROVIDERS[provider].ttls.includes(ttl), "TTL", "Unsupported provider retention period.");
+  const sampleBytes = saved?.sample_bytes ?? saved?.parts?.[0]?.plain_bytes ?? Math.min(partBytes, 256 * 1024);
+  need(Number.isSafeInteger(sampleBytes) && sampleBytes > 0 && sampleBytes <= 1024 ** 2, "ARGUMENT", "Invalid route sample size.");
+  let source = sourcePlan(file, partBytes, sampleBytes);
+  if (exists(out) && !exists(stateFile) && exists(path10.join(out, "upload-receipt.json")))
+    return resumeShare(out, options);
+  if (!exists(out))
+    checkedDirectory(out);
+  need(exists(stateFile) || fs10.readdirSync(out).length === 0, "DEST_EXISTS", "Output belongs to another operation; choose a new directory.");
+  checkedDirectory(out);
+  const unlock = lock(out), request = options.request || http, started = Date.now();
+  let state;
+  const progress = (phase, extra = {}) => options.progress?.({
+    phase,
+    completed_parts: state?.parts.filter((p3) => p3.verified).length || 0,
+    total_parts: source.parts.length,
+    elapsed_ms: Date.now() - started,
+    ...extra
+  });
+  try {
+    if (exists(stateFile)) {
+      state = readJSON(stateFile);
+      need(state?.format === "session-bridge-upload" && state.state_version === 1 && state.archive_sha256 === source.archive_sha256 && state.bundle_id === source.bundle_id && state.part_bytes === partBytes && (state.configured_part_bytes ?? state.part_bytes) === configuredBytes && state.requested_provider === provider && state.ttl === ttl && hash(json(state.parts.map(({ index, offset, plain_bytes, plain_sha256 }) => ({ index, offset, plain_bytes, plain_sha256 })))) === hash(json(source.parts)), "RESUME_MISMATCH", "Archive or options differ from this checkpoint; retain it and use a new output directory.");
+    } else {
+      state = {
+        format: "session-bridge-upload",
+        state_version: 1,
+        source_file: path10.resolve(file),
+        ...source,
+        part_bytes: partBytes,
+        configured_part_bytes: configuredBytes,
+        adaptive_parts: options.partBytes === undefined,
+        sample_bytes: source.parts[0].plain_bytes,
+        requested_provider: provider,
+        provider: provider === "auto" ? null : provider,
+        ttl,
+        created_at: now(),
+        parts: source.parts
+      };
+      atomicJSON(stateFile, state);
+    }
+    if (!exists(path10.join(out, "identity.agekey"))) {
+      need(state.parts.every((p3) => !p3.encrypted && !p3.remote), "CRYPTO", "Original encryption identity is missing; completed remote parts cannot be re-keyed.");
+      writeNew(path10.join(out, "identity.agekey"), await generateIdentity() + `
+`);
+    }
+    const identity2 = readBytes(path10.join(out, "identity.agekey"), 1024).toString().trim();
+    await identityToRecipient(identity2);
+    const cipherFor = async (part) => {
+      const filename = path10.join(out, `part-${String(part.index).padStart(5, "0")}.age`);
+      if (part.encrypted && validFile(filename, part.encrypted.bytes, part.encrypted.sha256))
+        return readBytes(filename, MAX_PART);
+      const accepted = part.remote || Object.values(state.probes || {}).find((p3) => p3.remote)?.remote;
+      let cipher;
+      if (accepted && part.encrypted && part.index === 0)
+        cipher = await download(accepted.download_url, accepted.provider, part.encrypted.bytes, part.encrypted.sha256, request);
+      else
+        cipher = await seal(readPart(file, part), identity2);
+      if (exists(filename))
+        remove(filename);
+      writeNew(filename, cipher);
+      if (part.encrypted && (part.encrypted.bytes !== cipher.length || part.encrypted.sha256 !== hash(cipher))) {
+        delete part.remote;
+        delete part.verified;
+        if (part.index === 0)
+          state.probes = {};
+      }
+      part.encrypted = { bytes: cipher.length, sha256: hash(cipher) };
+      atomicJSON(stateFile, state);
+      return cipher;
+    };
+    const processPart = async (part, selected) => {
+      const partRequest = (url, init, limit, policy) => request(url, init, limit, {
+        ...policy,
+        onProgress: (event) => progress("network_progress", { part: part.index + 1, provider: selected, ...event })
+      });
+      const expiry = part.remote?.reported_expires_at || part.remote?.estimated_expires_at;
+      if (expiry && Date.parse(expiry) <= Date.now()) {
+        delete part.remote;
+        delete part.verified;
+        atomicJSON(stateFile, state);
+      }
+      if (part.verified && part.remote) {
+        validateURL(part.remote.download_url, part.remote.provider);
+        progress("reused", { part: part.index + 1, provider: selected });
+        return;
+      }
+      const cipher = await cipherFor(part);
+      if (!part.remote) {
+        progress("uploading", { part: part.index + 1, provider: selected, bytes: cipher.length });
+        part.remote = await upload(cipher, selected, ttl, partRequest);
+        atomicJSON(stateFile, state);
+      }
+      progress("verifying", { part: part.index + 1, provider: part.remote.provider });
+      await download(part.remote.download_url, part.remote.provider, cipher.length, hash(cipher), partRequest);
+      part.verified = true;
+      atomicJSON(stateFile, state);
+      progress("verified", { part: part.index + 1, provider: part.remote.provider });
+    };
+    const fingerprint = hash(JSON.stringify([os7.networkInterfaces(), process.env.HTTPS_PROXY || "", process.env.HTTP_PROXY || "", process.env.ALL_PROXY || ""]));
+    if (provider === "auto" && (state.reselect_on_resume || state.network_fingerprint && state.network_fingerprint !== fingerprint)) {
+      (state.orphan_receipts ||= []).push(...Object.values(state.probes || {}).map((p3) => p3.remote).filter(Boolean));
+      state.provider = null;
+      state.probes = {};
+    }
+    if (!state.provider) {
+      const cipher = await cipherFor(state.parts[0]), controllers = TRANSFER_DEFAULTS.providers.map(() => new AbortController);
+      state.probes ||= {};
+      const errors2 = {};
+      const candidates = TRANSFER_DEFAULTS.providers.map((candidate, index) => (async () => {
+        const begin = Date.now(), probe = state.probes[candidate] ||= {};
+        const scoped = (url, init, limit, policy) => request(url, { ...init, signal: controllers[index].signal }, limit, {
+          ...policy,
+          onProgress: (event) => progress("testing_relay_progress", { provider: candidate, ...event })
+        });
+        progress("testing_relay", { provider: candidate, bytes: cipher.length });
+        try {
+          const expiry = probe.remote?.reported_expires_at || probe.remote?.estimated_expires_at;
+          if (expiry && Date.parse(expiry) <= Date.now())
+            delete probe.remote;
+          if (!probe.remote) {
+            probe.remote = await upload(cipher, candidate, ttl, scoped);
+            atomicJSON(stateFile, state);
+          }
+          const uploaded = Date.now();
+          await download(probe.remote.download_url, candidate, cipher.length, hash(cipher), scoped);
+          probe.upload_ms = uploaded - begin;
+          probe.readback_ms = Date.now() - uploaded;
+          probe.roundtrip_ms = Date.now() - begin;
+          probe.verified = true;
+          atomicJSON(stateFile, state);
+          return { candidate, index, probe };
+        } catch (error) {
+          errors2[candidate] = error instanceof BridgeError ? error.code : "NETWORK";
+          throw error;
+        }
+      })());
+      let winner;
+      try {
+        winner = await Promise.any(candidates);
+      } catch {
+        throw new BridgeError("NO_RELAY", "No relay passed encrypted upload/readback verification: " + Object.entries(errors2).map(([name, code]) => name + "=" + code).join(", ") + ". Resume later with the same output directory.");
+      } finally {
+        controllers.forEach((c3) => c3.abort());
+        await Promise.allSettled(candidates);
+      }
+      state.provider = winner.candidate;
+      state.network_fingerprint = fingerprint;
+      state.reselect_on_resume = false;
+      if (state.parts[0].remote && state.parts[0].remote.download_url !== winner.probe.remote.download_url)
+        (state.parts[0].previous_receipts ||= []).push(state.parts[0].remote);
+      state.parts[0].remote = winner.probe.remote;
+      state.parts[0].verified = true;
+      if (!state.tuned && state.parts.length > 1 && state.parts.slice(1).every((p3) => !p3.encrypted && !p3.remote)) {
+        const tuned = tuneTransfer(source.archive_bytes, cipher.length, winner.probe.readback_ms, state.adaptive_parts ? undefined : configuredBytes, options.concurrency);
+        concurrency = tuned.concurrency;
+        if (tuned.partBytes !== partBytes) {
+          const first = state.parts[0];
+          partBytes = tuned.partBytes;
+          source = sourcePlan(file, partBytes, state.sample_bytes);
+          state.parts = source.parts;
+          state.parts[0] = { ...state.parts[0], encrypted: first.encrypted, remote: first.remote, verified: true, previous_receipts: first.previous_receipts };
+          state.part_bytes = partBytes;
+          state.requires_v2 = source.requires_v2;
+        }
+        state.concurrency = concurrency;
+        state.tuned = true;
+        state.measured_readback_bytes_per_second = tuned.measured_readback_bytes_per_second;
+      }
+      for (const part of state.parts.slice(1))
+        if (!part.verified && part.remote && part.remote.provider !== state.provider) {
+          (part.previous_receipts ||= []).push(part.remote);
+          delete part.remote;
+          delete part.verified;
+        }
+      progress("relay_selected", {
+        provider: state.provider,
+        probe_bytes: cipher.length,
+        roundtrip_ms: winner.probe.roundtrip_ms,
+        upload_ms: winner.probe.upload_ms,
+        readback_ms: winner.probe.readback_ms,
+        part_bytes: partBytes,
+        concurrency
+      });
+      atomicJSON(stateFile, state);
+    }
+    await pool(state.parts, concurrency, (part) => processPart(part, state.provider));
+    let remote, data, version2 = 1;
+    if (state.parts.length === 1 && !source.requires_v2) {
+      remote = state.parts[0].remote;
+      data = state.parts[0].encrypted;
+    } else {
+      version2 = 2;
+      const manifest = {
+        format: "session-bridge-parts",
+        version: 1,
+        bundle_id: source.bundle_id,
+        archive_bytes: source.archive_bytes,
+        archive_sha256: source.archive_sha256,
+        parts: state.parts.map((p3) => ({
+          index: p3.index,
+          provider: p3.remote.provider,
+          url: p3.remote.download_url,
+          bytes: p3.encrypted.bytes,
+          sha256: p3.encrypted.sha256,
+          plain_bytes: p3.plain_bytes,
+          plain_sha256: p3.plain_sha256
+        })),
+        ...earliest(state.parts.map((p3) => p3.remote))
+      };
+      const manifestFile = path10.join(out, "parts-manifest.age");
+      if (!state.manifest || state.manifest.plain_sha256 !== hash(json(manifest)) || !validFile(manifestFile, state.manifest.bytes, state.manifest.sha256)) {
+        if (exists(manifestFile))
+          remove(manifestFile);
+        const encrypted2 = await seal(json(manifest), identity2);
+        writeNew(manifestFile, encrypted2);
+        state.manifest = { bytes: encrypted2.length, sha256: hash(encrypted2), plain_sha256: hash(json(manifest)) };
+        atomicJSON(stateFile, state);
+      }
+      const encrypted = readBytes(manifestFile, LIMIT.meta);
+      const expiry = state.manifest.remote?.reported_expires_at || state.manifest.remote?.estimated_expires_at;
+      if (expiry && Date.parse(expiry) <= Date.now()) {
+        delete state.manifest.remote;
+        delete state.manifest.verified;
+        atomicJSON(stateFile, state);
+      }
+      if (!state.manifest.remote) {
+        progress("publishing_manifest", { provider: state.provider });
+        state.manifest.remote = await upload(encrypted, state.provider, ttl, request);
+        atomicJSON(stateFile, state);
+      }
+      if (!state.manifest.verified) {
+        await download(state.manifest.remote.download_url, state.manifest.remote.provider, encrypted.length, hash(encrypted), request);
+        state.manifest.verified = true;
+        atomicJSON(stateFile, state);
+      }
+      remote = { ...state.manifest.remote, ...earliest([...state.parts.map((p3) => p3.remote), state.manifest.remote]) };
+      data = state.manifest;
+    }
+    const transfer = envelope(remote, data, identity2, source.bundle_id, version2), promptFile = path10.join(out, "continuation-prompt.txt");
+    const receipt = {
+      ...remote,
+      version: version2,
+      bundle_id: source.bundle_id,
+      ciphertext_bytes: data.bytes,
+      ciphertext_sha256: data.sha256,
+      part_count: state.parts.length,
+      archive_bytes: source.archive_bytes,
+      completed_at: now()
+    };
+    if (exists(promptFile))
+      remove(promptFile);
+    writeNew(promptFile, renderPrompt(transfer));
+    atomicJSON(path10.join(out, "upload-receipt.json"), receipt);
+    state.complete = true;
+    atomicJSON(stateFile, state);
+    progress("prompt_ready", { provider: state.provider });
+    return {
+      status: "prompt_ready",
+      ...receipt,
+      prompt_file: promptFile,
+      receipt: path10.join(out, "upload-receipt.json"),
+      checkpoint: stateFile,
+      resumable: true,
+      concurrency,
+      remote_verified_at: now(),
+      coverage: source.coverage
+    };
+  } catch (error) {
+    if (state && provider === "auto" && error instanceof BridgeError && (["NETWORK", "IDLE_TIMEOUT", "HEADER_TIMEOUT", "TRANSFER_TIMEOUT", "NO_RELAY", "RETRY_LATER"].includes(error.code) || error.code === "HTTP_STATUS")) {
+      state.reselect_on_resume = true;
+      atomicJSON(stateFile, state);
+    }
+    atomicJSON(path10.join(out, "failure.json"), { status: "not_ready", resumable: true, failed_at: now(), note: "Retry with the same archive/options/output directory. Completed uploads and verifications are retained. No private identity was sent to a relay." });
+    throw error;
+  } finally {
+    unlock();
+  }
+}
+function parseTransferAny(text) {
+  need(Buffer.byteLength(text) <= LIMIT.transfer, "LIMIT", "Transfer prompt too large.");
+  let raw = text;
+  if (raw.includes("<session-bridge-transfer>")) {
+    need(raw.split("<session-bridge-transfer>").length === 2 && raw.split("</session-bridge-transfer>").length === 2, "TRANSFER", "Ambiguous transfer blocks.");
+    raw = raw.split("<session-bridge-transfer>")[1].split("</session-bridge-transfer>")[0];
+  }
+  const candidate = parseJSON(raw);
+  if (candidate?.version !== 2)
+    return parseTransfer(text);
+  const valid = parseTransfer(JSON.stringify({ ...candidate, version: 1 }));
+  need(valid.ciphertext_bytes <= LIMIT.meta, "LIMIT", "Encrypted part manifest exceeds its limit.");
+  return { ...valid, version: 2 };
+}
+function validatePartsManifest(value, bundleId) {
+  need(value?.format === "session-bridge-parts" && value.version === 1 && value.bundle_id === bundleId && Number.isSafeInteger(value.archive_bytes) && value.archive_bytes > 0 && value.archive_bytes <= LIMIT.archive && isHash(value.archive_sha256) && Array.isArray(value.parts) && value.parts.length >= 1 && value.parts.length <= TRANSFER_DEFAULTS.maximum_parts, "MANIFEST", "Invalid multipart manifest.");
+  let total = 0;
+  const locations = new Set;
+  value.parts.forEach((p3, i) => {
+    need(p3?.index === i && Number.isSafeInteger(p3.bytes) && p3.bytes >= MIN_CIPHER && p3.bytes <= MAX_PART && isHash(p3.sha256) && Number.isSafeInteger(p3.plain_bytes) && p3.plain_bytes > 0 && p3.plain_bytes <= 16 * 1024 ** 2 && isHash(p3.plain_sha256), "MANIFEST", "Invalid, missing or reordered transfer part.");
+    validateURL(p3.url, p3.provider);
+    need(!locations.has(p3.url), "MANIFEST", "Duplicate remote part locations.");
+    locations.add(p3.url);
+    total += p3.plain_bytes;
+  });
+  need(total === value.archive_bytes, "MANIFEST", "Part sizes do not match the archive.");
+  return value;
+}
+async function downloadCached(url, provider, bytes, sha, directory, options = {}) {
+  validateURL(url, provider);
+  need(Number.isSafeInteger(bytes) && bytes > 0 && bytes <= LIMIT.archive && isHash(sha), "TRANSFER", "Invalid cached download identity.");
+  const cache = path10.resolve(directory), marker = path10.join(cache, "ranges.json"), file = path10.join(cache, "cipher.age"), request = options.request || http;
+  checkedDirectory(cache);
+  need(exists(marker) || fs10.readdirSync(cache).length === 0, "CACHE", "Range cache is not owned by this transfer.");
+  const unlock = lock(cache);
+  try {
+    let state;
+    if (exists(marker)) {
+      state = readJSON(marker);
+      need(state?.format === "session-bridge-ranges" && state.bytes === bytes && state.sha256 === sha && state.locator_sha256 === hash(provider + url), "CACHE", "Range cache belongs to another ciphertext.");
+    } else {
+      state = { format: "session-bridge-ranges", bytes, sha256: sha, locator_sha256: hash(provider + url), segment_bytes: 256 * 1024, ranges: {} };
+      atomicJSON(marker, state);
+    }
+    if (validFile(file, bytes, sha))
+      return file;
+    const full = async () => {
+      const data = await download(url, provider, bytes, sha, request);
+      if (exists(file))
+        remove(file);
+      writeNew(file, data);
+      return file;
+    };
+    if (provider !== "filebin" || bytes <= state.segment_bytes || state.range_supported === false)
+      return await full();
+    need(state.segment_bytes === 256 * 1024, "CACHE", "Unexpected range size in cache.");
+    const pieces = Array.from({ length: Math.ceil(bytes / state.segment_bytes) }, (_4, i) => ({ index: i, start: i * state.segment_bytes, end: Math.min(bytes - 1, (i + 1) * state.segment_bytes - 1) }));
+    const fetchPiece = async (piece) => {
+      const name = path10.join(cache, `range-${String(piece.index).padStart(5, "0")}.bin`), previous = state.ranges[piece.index];
+      if (previous && validFile(name, piece.end - piece.start + 1, previous.sha256))
+        return;
+      const data = await downloadRange(url, provider, piece.start, piece.end, bytes, request);
+      if (options.reference)
+        need(hash(data) === hash(options.reference.subarray(piece.start, piece.end + 1)), "HASH_MISMATCH", "Remote range differs from the local encrypted source.");
+      if (exists(name))
+        remove(name);
+      writeNew(name, data);
+      state.ranges[piece.index] = { sha256: hash(data) };
+      atomicJSON(marker, state);
+      options.progress?.({ phase: "range_verified", completed_ranges: Object.keys(state.ranges).length, total_ranges: pieces.length });
+    };
+    try {
+      if (state.range_supported !== true) {
+        await fetchPiece(pieces[0]);
+        state.range_supported = true;
+        atomicJSON(marker, state);
+      }
+      await pool(pieces, options.concurrency ?? 3, fetchPiece);
+    } catch (error) {
+      if (!(error instanceof BridgeError) || error.code !== "RANGE_UNSUPPORTED")
+        throw error;
+      state.range_supported = false;
+      atomicJSON(marker, state);
+      return await full();
+    }
+    const partial = path10.join(cache, "cipher.partial");
+    if (exists(partial))
+      remove(partial);
+    const fd = fs10.openSync(partial, "wx", 384), digest = createHash3("sha256");
+    let size = 0;
+    try {
+      for (const piece of pieces) {
+        const data = readBytes(path10.join(cache, `range-${String(piece.index).padStart(5, "0")}.bin`), state.segment_bytes);
+        digest.update(data);
+        let offset = 0;
+        while (offset < data.length) {
+          const n = fs10.writeSync(fd, data, offset, data.length - offset);
+          need(n > 0, "IO", "Range assembly failed.");
+          offset += n;
+        }
+        size += data.length;
+      }
+    } finally {
+      fs10.closeSync(fd);
+    }
+    need(size === bytes && digest.digest("hex") === sha, "HASH_MISMATCH", "Assembled ciphertext differs from the trusted transfer.");
+    if (exists(file))
+      remove(file);
+    fs10.renameSync(partial, file);
+    return file;
+  } finally {
+    unlock();
+  }
+}
+async function receiveTransfer(text, destination, options = {}) {
+  const transfer = parseTransferAny(text);
+  const dest = path10.resolve(destination);
+  need(!exists(dest), "DEST_EXISTS", "Recovery destination already exists.");
+  const cache = path10.resolve(options.cache || dest + ".session-bridge-cache"), marker = path10.join(cache, "cache.json");
+  need(!inside(dest, cache) && !inside(cache, dest), "SCOPE", "Recovery and download cache directories must be separate.");
+  need(Number.isSafeInteger(options.concurrency ?? 3) && (options.concurrency ?? 3) >= 1 && (options.concurrency ?? 3) <= 6, "ARGUMENT", "Concurrency must be between 1 and 6.");
+  if (exists(cache))
+    need(exists(marker), "CACHE", "Existing cache is not owned by Session Bridge.");
+  checkedDirectory(cache);
+  if (!exists(marker))
+    writeJSON(marker, { format: "session-bridge-download", manifest_sha256: transfer.ciphertext_sha256, bundle_id: transfer.bundle_id });
+  const state = readJSON(marker);
+  need(state?.format === "session-bridge-download" && state.manifest_sha256 === transfer.ciphertext_sha256 && state.bundle_id === transfer.bundle_id, "CACHE", "Cache belongs to a different transfer.");
+  const unlock = lock(cache), request = options.request || http;
+  let success = false;
+  try {
+    if (transfer.version === 1) {
+      const cipher = await downloadCached(transfer.download_url, transfer.provider, transfer.ciphertext_bytes, transfer.ciphertext_sha256, path10.join(cache, "legacy-cipher"), { request, concurrency: options.concurrency, progress: options.progress });
+      const plain = await open2(readBytes(cipher, LIMIT.archive), transfer.identity);
+      need(verifyBytes(plain).bundle_id === transfer.bundle_id, "IDENTITY_MISMATCH", "Recovered bundle differs from the transfer.");
+      const archive2 = path10.join(cache, "archive.zip");
+      if (exists(archive2))
+        remove(archive2);
+      writeNew(archive2, plain);
+      const result2 = unpack(archive2, dest, options);
+      writeJSON(path10.join(dest, "recovery/relay-report.json"), { transfer_version: 1, provider: transfer.provider, ciphertext_sha256: transfer.ciphertext_sha256, verified_at: now(), private_key_saved_in_recovery: false });
+      success = true;
+      return { ...result2, transfer_version: 1, resumable: true };
+    }
+    const manifestFile = path10.join(cache, "manifest.age");
+    if (!validFile(manifestFile, transfer.ciphertext_bytes, transfer.ciphertext_sha256)) {
+      const bytes = await download(transfer.download_url, transfer.provider, transfer.ciphertext_bytes, transfer.ciphertext_sha256, request);
+      if (exists(manifestFile))
+        remove(manifestFile);
+      writeNew(manifestFile, bytes);
+    }
+    const manifest = validatePartsManifest(parseJSON(await open2(readBytes(manifestFile, LIMIT.meta), transfer.identity)), transfer.bundle_id);
+    let completed = 0;
+    await pool(manifest.parts, options.concurrency ?? TRANSFER_DEFAULTS.concurrency, async (part) => {
+      const file = path10.join(cache, `part-${String(part.index).padStart(5, "0")}.age`);
+      if (!validFile(file, part.bytes, part.sha256)) {
+        options.progress?.({ phase: "downloading", part: part.index + 1, total_parts: manifest.parts.length, completed_parts: completed, provider: part.provider });
+        const partRequest = (url, init, limit, policy) => request(url, init, limit, {
+          ...policy,
+          onProgress: (event) => options.progress?.({ phase: "network_progress", part: part.index + 1, provider: part.provider, ...event })
+        });
+        const bytes = await download(part.url, part.provider, part.bytes, part.sha256, partRequest);
+        if (exists(file))
+          remove(file);
+        writeNew(file, bytes);
+      }
+      completed++;
+      options.progress?.({ phase: "downloaded", part: part.index + 1, total_parts: manifest.parts.length, completed_parts: completed });
+    });
+    const partial = path10.join(cache, "archive.partial");
+    if (exists(partial))
+      remove(partial);
+    const fd = fs10.openSync(partial, "wx", 384), digest = createHash3("sha256");
+    let written = 0;
+    try {
+      for (const part of manifest.parts) {
+        const plain = await open2(readBytes(path10.join(cache, `part-${String(part.index).padStart(5, "0")}.age`), MAX_PART), transfer.identity);
+        need(plain.length === part.plain_bytes && hash(plain) === part.plain_sha256, "HASH_MISMATCH", "Decrypted part differs from its manifest.");
+        digest.update(plain);
+        let offset = 0;
+        while (offset < plain.length) {
+          const n = fs10.writeSync(fd, plain, offset, plain.length - offset);
+          need(n > 0, "IO", "Archive assembly failed.");
+          offset += n;
+        }
+        written += plain.length;
+      }
+    } finally {
+      fs10.closeSync(fd);
+    }
+    need(written === manifest.archive_bytes && digest.digest("hex") === manifest.archive_sha256, "HASH_MISMATCH", "Assembled archive differs from the source.");
+    const archive = path10.join(cache, "archive.zip");
+    if (exists(archive))
+      remove(archive);
+    fs10.renameSync(partial, archive);
+    const result = unpack(archive, dest, options);
+    writeJSON(path10.join(dest, "recovery/relay-report.json"), {
+      transfer_version: 2,
+      bundle_id: transfer.bundle_id,
+      part_count: manifest.parts.length,
+      providers: [...new Set(manifest.parts.map((p3) => p3.provider))],
+      archive_sha256: manifest.archive_sha256,
+      verified_at: now(),
+      private_key_saved_in_recovery: false
+    });
+    success = true;
+    return { ...result, transfer_version: 2, part_count: manifest.parts.length, resumable: true };
+  } finally {
+    unlock();
+    if (success)
+      remove(cache);
+  }
+}
+async function resumeShare(output, options = {}) {
+  const out = path10.resolve(output), stateFile = path10.join(out, "checkpoint.json");
+  need(exists(out) && fs10.lstatSync(out).isDirectory() && !fs10.lstatSync(out).isSymbolicLink(), "RESUME_MISMATCH", "Transfer output directory is missing or linked.");
+  if (exists(stateFile)) {
+    const state = readJSON(stateFile);
+    need(state?.format === "session-bridge-upload", "RESUME_MISMATCH", "Unrecognized upload checkpoint.");
+    return shareMultipart(state.source_file, state.requested_provider, state.ttl, out, {
+      ...options,
+      ...state.adaptive_parts ? {} : { partBytes: state.configured_part_bytes ?? state.part_bytes }
+    });
+  }
+  checkedDirectory(out);
+  const unlock = lock(out);
+  try {
+    const receipt = readJSON(path10.join(out, "upload-receipt.json")), cipher = readBytes(path10.join(out, "payload.session.zip.age"), LIMIT.archive);
+    const identity2 = readBytes(path10.join(out, "identity.agekey"), 1024).toString().trim();
+    need(cipher.length === receipt.ciphertext_bytes && hash(cipher) === receipt.ciphertext_sha256, "HASH_MISMATCH", "Legacy ciphertext differs from its saved receipt.");
+    const transfer = parseTransfer(JSON.stringify({ ...receipt, identity: identity2, encryption: "age-v1-x25519", delete_after_restore: false }));
+    const archive = await open2(cipher, identity2);
+    need(verifyBytes(archive).bundle_id === transfer.bundle_id, "IDENTITY_MISMATCH", "Legacy receipt and encrypted bundle differ.");
+    options.progress?.({ phase: "verifying_legacy_upload", bytes: cipher.length, provider: receipt.provider });
+    const readbackCache = path10.join(out, "legacy-readback.session-bridge-cache");
+    await downloadCached(receipt.download_url, receipt.provider, cipher.length, receipt.ciphertext_sha256, readbackCache, { request: options.request, concurrency: options.concurrency ?? 6, progress: options.progress, reference: cipher });
+    const prompt = path10.join(out, "continuation-prompt.txt");
+    if (exists(prompt))
+      remove(prompt);
+    writeNew(prompt, renderPrompt(transfer));
+    atomicJSON(path10.join(out, "verified-transfer.json"), receipt);
+    remove(readbackCache);
+    return { status: "prompt_ready", ...receipt, prompt_file: prompt, reused_existing_upload: true, remote_verified_at: now() };
+  } finally {
+    unlock();
+  }
+}
+async function revokeTransfer(receiptFile, request = http) {
+  const receipt = readJSON(receiptFile), stateFile = path10.join(path10.dirname(receiptFile), "checkpoint.json");
+  if (!exists(stateFile))
+    return revoke(receiptFile);
+  const state = readJSON(stateFile);
+  need(state?.format === "session-bridge-upload" && state.bundle_id === receipt.bundle_id, "RECEIPT", "Receipt does not match this upload checkpoint.");
+  const remotes = [
+    ...state.parts.flatMap((p3) => [p3.remote, ...p3.previous_receipts || []]),
+    state.manifest?.remote,
+    ...Object.values(state.probes || {}).map((p3) => p3.remote),
+    ...state.orphan_receipts || []
+  ].filter(Boolean);
+  const unique = [...new Map(remotes.map((r3) => [r3.download_url, r3])).values()];
+  let removed = 0, unsupported = 0;
+  await pool(unique, 2, async (remote) => {
+    validateURL(remote.download_url, remote.provider);
+    if (remote.provider !== "filebin") {
+      unsupported++;
+      return;
+    }
+    need(new URL(remote.download_url).hostname === "filebin.net", "URL", "Deletion requires the original Filebin locator.");
+    const response = await request(remote.download_url, { method: "DELETE" });
+    need([200, 404].includes(response.status), "DELETE_UNCONFIRMED", "A Filebin object could not be deleted; retry with the same receipt.");
+    need((await request(remote.download_url)).status === 404, "DELETE_UNCONFIRMED", "A Filebin object remains available.");
+    removed++;
+  });
+  return {
+    status: unsupported ? "partial_deletion" : "public_entries_unavailable",
+    bundle_id: state.bundle_id,
+    deleted_objects: removed,
+    unsupported_objects: unsupported,
+    physical_erasure_verified: false,
+    checked_at: now()
+  };
+}
+
 // bun-src/cli.ts
 var { BridgeError: BridgeError2, exists: exists2, hash: hash2, json: json2, LIMIT: LIMIT2, listing: listing2, need: need2, newDir: newDir2, parseJSON: parseJSON2, readBytes: readBytes2, readJSON: readJSON2, remove: remove2, temporary: temporary2, uuid: uuid2, VERSION: VERSION2, writeJSON: writeJSON2, writeNew: writeNew2 } = exports_common;
 async function currentDistribution(operation) {
   const tmp = temporary2();
   try {
-    return await operation(materializeDistribution(path10.join(tmp, "session-bridge"), import.meta.url));
+    return await operation(materializeDistribution(path11.join(tmp, "session-bridge"), import.meta.url));
   } finally {
     remove2(tmp);
   }
@@ -32369,44 +33253,44 @@ function packageSkill(source, output) {
   need2(!scan.files.some((f4) => f4.endsWith(".py") || f4.endsWith(".pyc")), "PACKAGE", "Python file in Bun distribution.");
   const entries = new Map;
   for (const rel of scan.files)
-    entries.set("session-bridge/" + rel, { data: readBytes2(path10.join(source, rel)), executable: !!(fs10.statSync(path10.join(source, rel)).mode & 73) });
+    entries.set("session-bridge/" + rel, { data: readBytes2(path11.join(source, rel)), executable: !!(fs11.statSync(path11.join(source, rel)).mode & 73) });
   const bytes = zipEncode(entries);
   zipDecode(bytes);
   writeNew2(output, bytes);
-  writeNew2(output + ".sha256", hash2(bytes) + "  " + path10.basename(output) + `
+  writeNew2(output + ".sha256", hash2(bytes) + "  " + path11.basename(output) + `
 `);
-  return { version: VERSION2, archive: path10.resolve(output), sha256: hash2(bytes), bytes: bytes.length, files: scan.files.length, python_files: 0 };
+  return { version: VERSION2, archive: path11.resolve(output), sha256: hash2(bytes), bytes: bytes.length, files: scan.files.length, python_files: 0 };
 }
 function syntheticFixture(root) {
-  const work = path10.join(root, "project"), skillRoot = path10.join(root, "fixture-skills");
+  const work = path11.join(root, "project"), skillRoot = path11.join(root, "fixture-skills");
   newDir2(work);
-  writeJSON2(path10.join(work, "numbers.json"), { numbers: [2, 3, 5] });
-  writeNew2(path10.join(work, "notes.txt"), `\u975E\u654F\u611F Bun \u63A5\u7EED\u6D4B\u8BD5\u3002
+  writeJSON2(path11.join(work, "numbers.json"), { numbers: [2, 3, 5] });
+  writeNew2(path11.join(work, "notes.txt"), `\u975E\u654F\u611F Bun \u63A5\u7EED\u6D4B\u8BD5\u3002
 `);
-  writeNew2(path10.join(work, "blob.bin"), Buffer.from(Array.from({ length: 1024 }, (_4, i) => i % 256)));
-  writeNew2(path10.join(work, "do-not-run.ts"), `throw new Error("Do not run project hooks during restore");
+  writeNew2(path11.join(work, "blob.bin"), Buffer.from(Array.from({ length: 1024 }, (_4, i) => i % 256)));
+  writeNew2(path11.join(work, "do-not-run.ts"), `throw new Error("Do not run project hooks during restore");
 `);
-  const image = path10.join(root, "pixel.png");
+  const image = path11.join(root, "pixel.png");
   writeNew2(image, Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aCz8AAAAASUVORK5CYII=", "base64"));
-  const skill = path10.join(skillRoot, "sum-skill"), unused = path10.join(skillRoot, "unused-skill");
-  writeNew2(path10.join(skill, "SKILL.md"), `---
+  const skill = path11.join(skillRoot, "sum-skill"), unused = path11.join(skillRoot, "unused-skill");
+  writeNew2(path11.join(skill, "SKILL.md"), `---
 name: sum-skill
 description: Sum a JSON array and write plain integer output.
 ---
 
 Read assets/output-format.txt. Run scripts/sum.ts with the input and output paths.
 `);
-  writeNew2(path10.join(skill, "assets/output-format.txt"), `Output only an integer and a newline.
+  writeNew2(path11.join(skill, "assets/output-format.txt"), `Output only an integer and a newline.
 `);
-  writeNew2(path10.join(skill, "scripts/sum.ts"), `const input=await Bun.file(process.argv[2]).json(); await Bun.write(process.argv[3],String(input.numbers.reduce((a:number,b:number)=>a+b,0))+"\\n");
+  writeNew2(path11.join(skill, "scripts/sum.ts"), `const input=await Bun.file(process.argv[2]).json(); await Bun.write(process.argv[3],String(input.numbers.reduce((a:number,b:number)=>a+b,0))+"\\n");
 `);
-  writeNew2(path10.join(unused, "SKILL.md"), `---
+  writeNew2(path11.join(unused, "SKILL.md"), `---
 name: unused-skill
 description: Catalog-only fixture; must not be bundled.
 ---
 No usage.
 `);
-  const history = path10.join(root, "history.jsonl");
+  const history = path11.join(root, "history.jsonl");
   writeNew2(history, jsonl([
     { role: "developer", content: `Available skills:
 - sum-skill: arithmetic (file: ${skill}/SKILL.md)
@@ -32414,46 +33298,71 @@ No usage.
     { type: "function_call", name: "exec_command", arguments: JSON.stringify({ cmd: `cat '${skill}/SKILL.md'` }) },
     { role: "user", content: "Write the sum of numbers.json to answer.txt. Latest correction: plain integer text, not JSON." }
   ]));
-  const handoff = path10.join(root, "HANDOFF.md"), state = path10.join(root, "state.json");
+  const handoff = path11.join(root, "HANDOFF.md"), state = path11.join(root, "state.json");
   writeNew2(handoff, `# \u975E\u654F\u611F\u6D4B\u8BD5
 
 \u76EE\u6807\uFF1A\u4F7F\u7528\u5386\u53F2\u4E2D\u8BFB\u8FC7\u7684 sum-skill \u8BA1\u7B97 numbers.json \u5E76\u5199 answer.txt\u3002
 \u6700\u65B0\u4FEE\u6B63\uFF1A\u53EA\u5199\u6574\u6570\u548C\u6362\u884C\uFF1B\u671F\u671B 10\u3002\u539F\u8F93\u5165\u51C6\u5907\u5B8C\u6BD5\uFF0C\u8BA1\u7B97\u672A\u5B8C\u6210\u3002\u4E0D\u8981\u8FD0\u884C do-not-run.ts\u3002
 `);
   writeJSON2(state, { goal: "Use recovered sum-skill to compute answer.txt", next_action: "Read the bundled skill and execute its helper against restored workspace.", provenance: "synthetic-fixture" });
-  return { handoff, state, history, root: [work], attachment: [image], skillRoot: [skillRoot], harness: "synthetic-bun", sourceSession: "synthetic-bun-session", out: path10.join(root, "staging") };
+  return { handoff, state, history, root: [work], attachment: [image], skillRoot: [skillRoot], harness: "synthetic-bun", sourceSession: "synthetic-bun-session", out: path11.join(root, "staging") };
 }
-async function smokeTest(output, provider, ttl, live) {
+async function smokeTest(output, provider, ttl, live, fixtureMiB = 2) {
   need2(live, "AUTHORIZATION", "Public upload test requires --live and uses only synthetic data.");
-  const root = newDir2(output), source = path10.join(root, "source");
+  need2(Number.isSafeInteger(fixtureMiB) && fixtureMiB >= 0 && fixtureMiB <= 128, "ARGUMENT", "Synthetic fixture MiB must be between 0 and 128.");
+  const root = newDir2(output), source = path11.join(root, "source");
   newDir2(source);
   const options = syntheticFixture(source);
-  const prepared = prepare(options), archive = path10.join(root, "synthetic.session.zip");
+  if (fixtureMiB > 0) {
+    const fd = fs11.openSync(path11.join(source, "project/large-synthetic.bin"), "wx", 384);
+    try {
+      for (let i = 0;i < fixtureMiB; i++) {
+        const bytes = randomBytes7(1024 ** 2);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const n = fs11.writeSync(fd, bytes, offset, bytes.length - offset);
+          need2(n > 0, "IO", "Synthetic fixture write failed.");
+          offset += n;
+        }
+      }
+    } finally {
+      fs11.closeSync(fd);
+    }
+  }
+  const prepared = prepare(options), archive = path11.join(root, "synthetic.session.zip");
   pack(prepared.staging, archive);
-  const shared = await share(archive, provider, ttl, path10.join(root, "transfer"));
-  fs10.renameSync(source, path10.join(root, "source-offline"));
-  const dest = path10.join(root, "received"), registry = path10.join(root, "target-harness/skills"), cwd = newDir2(path10.join(root, "recipient-process"));
+  const networkStarted = Date.now(), progress = (event) => console.error(JSON.stringify({ status: "progress", ...event }));
+  const shared = await shareMultipart(archive, provider, ttl, path11.join(root, "transfer"), { progress });
+  const uploadMs = Date.now() - networkStarted, receivingStarted = Date.now();
+  fs11.renameSync(source, path11.join(root, "source-offline"));
+  const dest = path11.join(root, "received"), registry = path11.join(root, "target-harness/skills"), cwd = newDir2(path11.join(root, "recipient-process"));
   const child = Bun.spawn(selfCommand(["receive", "--transfer-file", shared.prompt_file, "--dest", dest, "--skills-dir", registry], import.meta.url), { cwd, stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, exit] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
   need2(exit === 0, "TEST", "Fresh receiving process failed; no real session was uploaded.");
-  const key = parseTransfer(readBytes2(shared.prompt_file, LIMIT2.transfer).toString("utf8")).identity;
+  const key = parseTransferAny(readBytes2(shared.prompt_file, LIMIT2.transfer).toString("utf8")).identity;
   need2(!stdout.includes(key) && !stderr.includes(key), "TEST", "Recipient diagnostics exposed key.");
-  const result = parseJSON2(stdout), skillReport = readJSON2(path10.join(dest, "recovery/skills.json"));
+  const result = parseJSON2(stdout), skillReport = readJSON2(path11.join(dest, "recovery/skills.json"));
   need2(skillReport.packaged.length === 1 && skillReport.packaged[0].name === "sum-skill", "TEST", "Usage discovery packaged wrong Skill set.");
-  for (const rel of listing2(path10.join(root, "source-offline/project")).files)
-    need2(hash2(readBytes2(path10.join(root, "source-offline/project", rel))) === hash2(readBytes2(path10.join(dest, "workspace/r001", rel))), "TEST", "Workspace bytes differ.");
-  const reference = parseJSON2(readBytes2(path10.join(dest, "bundle/context/references.jsonl")).toString("utf8").trim());
-  need2(hash2(readBytes2(path10.join(root, "source-offline/pixel.png"))) === hash2(readBytes2(path10.join(dest, "bundle", reference.bundle_path))), "TEST", "Attachment bytes differ.");
-  executeScript(path10.join(registry, "sum-skill/scripts/sum.ts"), [path10.join(dest, "workspace/r001/numbers.json"), path10.join(dest, "workspace/r001/answer.txt")]);
-  need2(readBytes2(path10.join(dest, "workspace/r001/answer.txt")).toString() === `10
+  for (const rel of listing2(path11.join(root, "source-offline/project")).files)
+    need2(hash2(readBytes2(path11.join(root, "source-offline/project", rel))) === hash2(readBytes2(path11.join(dest, "workspace/r001", rel))), "TEST", "Workspace bytes differ.");
+  const reference = parseJSON2(readBytes2(path11.join(dest, "bundle/context/references.jsonl")).toString("utf8").trim());
+  need2(hash2(readBytes2(path11.join(root, "source-offline/pixel.png"))) === hash2(readBytes2(path11.join(dest, "bundle", reference.bundle_path))), "TEST", "Attachment bytes differ.");
+  executeScript(path11.join(registry, "sum-skill/scripts/sum.ts"), [path11.join(dest, "workspace/r001/numbers.json"), path11.join(dest, "workspace/r001/answer.txt")]);
+  need2(readBytes2(path11.join(dest, "workspace/r001/answer.txt")).toString() === `10
 `, "TEST", "Recovered Skill could not continue the task.");
   const report = {
     status: "passed",
     version: VERSION2,
     tested_at: now(),
-    provider,
+    provider: shared.provider,
     bundle_id: shared.bundle_id,
     ciphertext_bytes: shared.ciphertext_bytes,
+    synthetic_fixture_mib: fixtureMiB,
+    archive_bytes: shared.archive_bytes,
+    part_count: shared.part_count,
+    concurrency: shared.concurrency,
+    source_upload_and_readback_ms: uploadMs,
+    target_receive_ms: Date.now() - receivingStarted,
     ciphertext_sha256: shared.ciphertext_sha256,
     reported_expires_at: shared.reported_expires_at,
     prompt_file: shared.prompt_file,
@@ -32475,20 +33384,20 @@ async function smokeTest(output, provider, ttl, live) {
     two_physical_machines_tested: false,
     destination: result.destination
   };
-  writeJSON2(path10.join(root, "live-test-report.json"), report);
+  writeJSON2(path11.join(root, "live-test-report.json"), report);
   return report;
 }
 async function selfTest(output) {
-  const root = output ? newDir2(output) : temporary2(undefined, "session-bridge-self-test-"), source = newDir2(path10.join(root, "source"));
+  const root = output ? newDir2(output) : temporary2(undefined, "session-bridge-self-test-"), source = newDir2(path11.join(root, "source"));
   try {
-    const options = syntheticFixture(source), prepared = prepare(options), archive = path10.join(root, "fixture.zip");
+    const options = syntheticFixture(source), prepared = prepare(options), archive = path11.join(root, "fixture.zip");
     pack(prepared.staging, archive);
-    const cipher = path10.join(root, "fixture.age"), identity2 = await encrypt(archive, cipher), plain = path10.join(root, "decrypted.zip");
+    const cipher = path11.join(root, "fixture.age"), identity2 = await encrypt(archive, cipher), plain = path11.join(root, "decrypted.zip");
     await decrypt(cipher, identity2, plain);
     need2(hash2(readBytes2(archive, LIMIT2.archive)) === hash2(readBytes2(plain, LIMIT2.archive)), "TEST", "Encryption round trip differs.");
     const modified = readBytes2(cipher, LIMIT2.archive);
     modified[modified.length - 1] ^= 1;
-    const tampered = path10.join(root, "tampered.age"), rejected = path10.join(root, "must-not-exist.zip");
+    const tampered = path11.join(root, "tampered.age"), rejected = path11.join(root, "must-not-exist.zip");
     writeNew2(tampered, modified);
     let refused = false;
     try {
@@ -32497,24 +33406,57 @@ async function selfTest(output) {
       refused = true;
     }
     need2(refused && !exists2(rejected), "TEST", "Modified ciphertext was not rejected atomically.");
-    fs10.renameSync(source, path10.join(root, "source-offline"));
-    const dest = path10.join(root, "received"), registry = path10.join(root, "target-harness/skills"), cwd = newDir2(path10.join(root, "recipient-process"));
+    const objects = new Map, uploads = new Map;
+    let disconnect = true;
+    const memoryHTTP = async (url, init = {}) => {
+      if (init.method === "POST") {
+        const bytes = Buffer.from(init.body);
+        objects.set(url, bytes);
+        uploads.set(hash2(bytes), (uploads.get(hash2(bytes)) || 0) + 1);
+        return { status: 201, headers: new Headers, data: json2({ file: { bytes: bytes.length, sha256: hash2(bytes) }, bin: { expired_at: "2099-01-01T00:00:00Z" } }) };
+      }
+      if (disconnect) {
+        disconnect = false;
+        throw new BridgeError2("NETWORK", "Synthetic part disconnect");
+      }
+      return { status: objects.has(url) ? 200 : 404, headers: new Headers, data: objects.get(url) || Buffer.alloc(0) };
+    };
+    const multipartOut = path11.join(root, "multipart-transfer");
+    let interrupted = false;
+    try {
+      await shareMultipart(archive, "filebin", "provider-default", multipartOut, { partBytes: 1024, request: memoryHTTP });
+    } catch (error) {
+      need2(error instanceof BridgeError2 && error.code === "NETWORK", "TEST", "Unexpected multipart failure.");
+      interrupted = true;
+    }
+    need2(interrupted && !exists2(path11.join(multipartOut, "continuation-prompt.txt")), "TEST", "An incomplete transfer produced a prompt.");
+    const accepted = new Map(uploads), multipartShared = await resumeShare(multipartOut, { request: memoryHTTP });
+    for (const [sha, count] of accepted)
+      need2(uploads.get(sha) === count, "TEST", "A completed upload was repeated.");
+    const multipartDest = path11.join(root, "received-multipart"), multipartRegistry = path11.join(root, "multipart-registry");
+    await receiveTransfer(readBytes2(multipartShared.prompt_file, LIMIT2.transfer).toString(), multipartDest, { request: memoryHTTP, skillsDir: multipartRegistry });
+    need2(hash2(readBytes2(path11.join(multipartDest, "recovery/original.session.zip"), LIMIT2.archive)) === hash2(readBytes2(archive, LIMIT2.archive)), "TEST", "Multipart restoration changed archive bytes.");
+    executeScript(path11.join(multipartRegistry, "sum-skill/scripts/sum.ts"), [path11.join(multipartDest, "workspace/r001/numbers.json"), path11.join(multipartDest, "workspace/r001/answer.txt")]);
+    need2(readBytes2(path11.join(multipartDest, "workspace/r001/answer.txt")).toString() === `10
+`, "TEST", "Multipart-carried Skill could not continue work.");
+    fs11.renameSync(source, path11.join(root, "source-offline"));
+    const dest = path11.join(root, "received"), registry = path11.join(root, "target-harness/skills"), cwd = newDir2(path11.join(root, "recipient-process"));
     const child = Bun.spawn(selfCommand(["unpack", plain, "--dest", dest, "--skills-dir", registry], import.meta.url), { cwd, stdout: "pipe", stderr: "pipe" });
     const [stdout, stderr, exit] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
     need2(exit === 0 && !stdout.includes(identity2) && !stderr.includes(identity2), "TEST", "Fresh receiving process failed or exposed identity.");
-    const report = readJSON2(path10.join(dest, "recovery/skills.json"));
+    const report = readJSON2(path11.join(dest, "recovery/skills.json"));
     need2(report.packaged.length === 1 && report.packaged[0].name === "sum-skill", "TEST", "Skill usage discovery differs.");
-    for (const rel of listing2(path10.join(root, "source-offline/project")).files)
-      need2(hash2(readBytes2(path10.join(root, "source-offline/project", rel))) === hash2(readBytes2(path10.join(dest, "workspace/r001", rel))), "TEST", "Workspace bytes differ.");
-    const attachment = parseJSON2(readBytes2(path10.join(dest, "bundle/context/references.jsonl")).toString("utf8").trim());
-    need2(hash2(readBytes2(path10.join(root, "source-offline/pixel.png"))) === hash2(readBytes2(path10.join(dest, "bundle", attachment.bundle_path))), "TEST", "Attachment bytes differ.");
-    executeScript(path10.join(registry, "sum-skill/scripts/sum.ts"), [path10.join(dest, "workspace/r001/numbers.json"), path10.join(dest, "workspace/r001/answer.txt")]);
-    need2(readBytes2(path10.join(dest, "workspace/r001/answer.txt")).toString() === `10
+    for (const rel of listing2(path11.join(root, "source-offline/project")).files)
+      need2(hash2(readBytes2(path11.join(root, "source-offline/project", rel))) === hash2(readBytes2(path11.join(dest, "workspace/r001", rel))), "TEST", "Workspace bytes differ.");
+    const attachment = parseJSON2(readBytes2(path11.join(dest, "bundle/context/references.jsonl")).toString("utf8").trim());
+    need2(hash2(readBytes2(path11.join(root, "source-offline/pixel.png"))) === hash2(readBytes2(path11.join(dest, "bundle", attachment.bundle_path))), "TEST", "Attachment bytes differ.");
+    executeScript(path11.join(registry, "sum-skill/scripts/sum.ts"), [path11.join(dest, "workspace/r001/numbers.json"), path11.join(dest, "workspace/r001/answer.txt")]);
+    need2(readBytes2(path11.join(dest, "workspace/r001/answer.txt")).toString() === `10
 `, "TEST", "Carried Skill could not continue the task.");
-    const installed = await currentDistribution((dist) => installSkill(dist, path10.join(root, "installation/skills")));
-    const reused = await currentDistribution((dist) => installSkill(dist, path10.join(root, "installation/skills")));
+    const installed = await currentDistribution((dist) => installSkill(dist, path11.join(root, "installation/skills")));
+    const reused = await currentDistribution((dist) => installSkill(dist, path11.join(root, "installation/skills")));
     need2(reused.status === "reused", "TEST", "Usable installation was not reused.");
-    const command = STANDALONE ? [path10.join(installed.path, process.platform === "win32" ? "session-bridge.exe" : "session-bridge"), "doctor"] : [process.execPath, "--no-install", path10.join(installed.path, "scripts/session-bridge.ts"), "doctor"];
+    const command = STANDALONE ? [path11.join(installed.path, process.platform === "win32" ? "session-bridge.exe" : "session-bridge"), "doctor"] : [process.execPath, "--no-install", path11.join(installed.path, "scripts/session-bridge.ts"), "doctor"];
     const check = Bun.spawnSync(command, { cwd, stdout: "pipe", stderr: "pipe" });
     need2(check.exitCode === 0 && parseJSON2(check.stdout).ready, "TEST", "Installed Skill is not self-contained.");
     const result = {
@@ -32536,12 +33478,14 @@ async function selfTest(output) {
       embedded_skill_installed_and_ran: true,
       installed_skill_reused: true,
       skills_engine: SKILLS_ENGINE,
+      multipart_roundtrip: true,
+      multipart_upload_resume: true,
       network_used: false,
       required_external_tools: [],
       output: output ? root : null
     };
     if (output)
-      writeJSON2(path10.join(root, "self-test-report.json"), result);
+      writeJSON2(path11.join(root, "self-test-report.json"), result);
     return result;
   } finally {
     if (!output)
@@ -32549,7 +33493,7 @@ async function selfTest(output) {
   }
 }
 function argumentsFor(argv2) {
-  const allowed = new Set(["handoff", "state", "history", "root", "attachment", "harness", "scope", "cwd", "source-session", "capture-method", "skill-root", "skill", "strict-skills", "out", "staging", "dest", "skills-dir", "transfer-file", "provider", "ttl", "receipt", "replace", "live", "source"]);
+  const allowed = new Set(["handoff", "state", "history", "root", "attachment", "harness", "scope", "cwd", "source-session", "capture-method", "skill-root", "skill", "strict-skills", "out", "staging", "dest", "skills-dir", "transfer-file", "provider", "ttl", "receipt", "replace", "live", "source", "part-mib", "concurrency", "cache", "require-transfer-version", "fixture-mib"]);
   const multiple = new Set(["root", "attachment", "skill-root", "skill"]), boolean = new Set(["strict-skills", "replace", "live"]), values = {}, positionals = [];
   for (let i = 0;i < argv2.length; i++) {
     const arg = argv2[i];
@@ -32576,8 +33520,8 @@ async function main(argv2 = Bun.argv.slice(2)) {
   const command = argv2.shift();
   if (!command || ["--help", "help", "-h"].includes(command)) {
     console.log("Session Bridge " + VERSION2 + (STANDALONE ? " (standalone, no external runtime)" : " (bundled Bun source)") + `
-Commands: doctor, detect-harness, prepare, pack, verify, unpack, share, receive, revoke, discover-skills, install-skills, install, package, self-test, smoke-test, run-script, licenses` + `
-Run: ` + (STANDALONE ? path10.basename(process.execPath) : "bun --no-install scripts/session-bridge.ts") + ` <command> [options]
+Commands: doctor, detect-harness, prepare, pack, verify, unpack, share, resume-share, receive, revoke, discover-skills, install-skills, install, package, self-test, smoke-test, run-script, licenses` + `
+Run: ` + (STANDALONE ? path11.basename(process.execPath) : "bun --no-install scripts/session-bridge.ts") + ` <command> [options]
 install writes the embedded Skill and a copy of this CLI; see references/commands.md.`);
     return 0;
   }
@@ -32585,8 +33529,15 @@ install writes the embedded Skill and a copy of this CLI; see references/command
     console.log(VERSION2);
     return 0;
   }
+  if (["share", "resume-share", "receive"].includes(command) && argv2.some((a2) => ["--help", "-h"].includes(a2))) {
+    console.log(command === "share" ? `Usage: share <bundle.zip> --out <directory> [--provider auto|filebin|tempsh|uguu|litterbox|tmpfiles] [--ttl provider-default] [--part-mib 1..16] [--concurrency 1..6]
+Default: measure encrypted upload/readback routes, 8 MiB parts and 3 workers. Retry the same command/output to resume.` : command === "resume-share" ? `Usage: resume-share --out <previous-transfer-directory> [--concurrency 1..6]
+Continue saved multipart checkpoints or finish verification of an already uploaded legacy payload.` : `Usage: receive --transfer-file <private-file|-> --dest <new-directory> [--cache <private-directory>] [--concurrency 1..6] [--skills-dir <registry>]
+Failed multipart receives retain validated encrypted parts; repeat the same command to resume.`);
+    return 0;
+  }
   if (["install", "detect-harness", "install-skills"].includes(command) && argv2.some((a2) => ["--help", "-h"].includes(a2))) {
-    console.log("Usage: " + command + (command === "install-skills" ? " --dest <recovery-directory>" : "") + " [--harness <id>] [--skills-dir <directory>] [--scope global|project] [--cwd <project>]" + (command === "install" ? " [--replace] [--source <local-skill>]" : "") + `
+    console.log("Usage: " + command + (command === "install-skills" ? " --dest <recovery-directory>" : "") + " [--harness <id>] [--skills-dir <directory>] [--scope global|project] [--cwd <project>]" + (command === "install" ? " [--replace] [--require-transfer-version 1|2] [--source <local-skill>]" : "") + `
 Default: detect the current harness and use user/global scope. A healthy installation is reused; --replace explicitly upgrades it.` + `
 Explicit directory and harness override detection. Conflicting/unknown running signals need an explicit target. detect-harness never writes files.`);
     return 0;
@@ -32604,13 +33555,37 @@ Explicit directory and harness override detection. Conflicting/unknown running s
       return 0;
     }
     const { values: v3, positionals: p3 } = argumentsFor(argv2), required = (...names) => names.forEach((n) => need2(typeof v3[n] === "string", "ARGUMENT", "Required option missing: " + n));
+    if (v3.requireTransferVersion !== undefined) {
+      need2(["1", "2"].includes(v3.requireTransferVersion), "ARGUMENT", "Required transfer version must be 1 or 2.");
+      v3.requireTransferVersion = Number(v3.requireTransferVersion);
+    }
+    const transferOptions = () => {
+      if (v3.partMib !== undefined)
+        need2(Number.isSafeInteger(Number(v3.partMib)) && Number(v3.partMib) >= 1 && Number(v3.partMib) <= 16, "ARGUMENT", "Part MiB must be between 1 and 16.");
+      return {
+        ...v3,
+        ...v3.partMib ? { partBytes: Number(v3.partMib) * 1024 ** 2 } : {},
+        ...v3.concurrency ? { concurrency: Number(v3.concurrency) } : {},
+        progress: (event) => console.error(JSON.stringify({ status: "progress", ...event }))
+      };
+    };
     let result;
     switch (command) {
       case "doctor":
         result = {
           ...doctor(),
           skills_engine: SKILLS_ENGINE,
-          compatibility: { transfer_versions: [1], read_bundle_versions: ["1.0", "1.1"], installation_receipt_version: 1 }
+          transfer: {
+            ...TRANSFER_DEFAULTS,
+            resumable_uploads: true,
+            resumable_multipart_downloads: true,
+            adaptive_parts: true,
+            probe_bytes: 256 * 1024,
+            maximum_concurrency: 6,
+            idle_timeout_ms: 45000,
+            attempts: 4
+          },
+          compatibility: { transfer_versions: [1, 2], read_bundle_versions: ["1.0", "1.1"], installation_receipt_version: 1 }
         };
         break;
       case "detect-harness":
@@ -32637,20 +33612,24 @@ Explicit directory and harness override detection. Conflicting/unknown running s
         result = unpack(p3[0], v3.dest, v3);
         break;
       case "share":
-        required("provider", "ttl", "out");
+        required("out");
         need2(p3.length === 1, "ARGUMENT", "Expected a bundle path.");
-        result = await share(p3[0], v3.provider, v3.ttl, v3.out);
+        result = await shareMultipart(p3[0], v3.provider || "auto", v3.ttl || "provider-default", v3.out, transferOptions());
+        break;
+      case "resume-share":
+        required("out");
+        result = await resumeShare(v3.out, transferOptions());
         break;
       case "receive":
         required("transferFile", "dest");
         {
           const text = v3.transferFile === "-" ? await Bun.stdin.text() : readBytes2(v3.transferFile, LIMIT2.transfer).toString("utf8");
-          result = await receive(text, v3.dest, v3);
+          result = await receiveTransfer(text, v3.dest, transferOptions());
         }
         break;
       case "revoke":
         required("receipt");
-        result = await revoke(v3.receipt);
+        result = await revokeTransfer(v3.receipt);
         break;
       case "discover-skills":
         required("history");
@@ -32660,7 +33639,7 @@ Explicit directory and harness override detection. Conflicting/unknown running s
         required("dest");
         {
           const target = await resolveInstallTarget(v3);
-          result = { ...installRecoveredSkills(path10.resolve(v3.dest), target.skills_directory), harness: target.harness, selection_basis: target.selection_basis };
+          result = { ...installRecoveredSkills(path11.resolve(v3.dest), target.skills_directory), harness: target.harness, selection_basis: target.selection_basis };
         }
         break;
       case "install":
@@ -32674,8 +33653,8 @@ Explicit directory and harness override detection. Conflicting/unknown running s
         result = await selfTest(v3.out);
         break;
       case "smoke-test":
-        required("out", "provider", "ttl");
-        result = await smokeTest(v3.out, v3.provider, v3.ttl, !!v3.live);
+        required("out");
+        result = await smokeTest(v3.out, v3.provider || "auto", v3.ttl || "provider-default", !!v3.live, v3.fixtureMib === undefined ? 2 : Number(v3.fixtureMib));
         break;
       default:
         throw new BridgeError2("ARGUMENT", "Unknown command.");
@@ -32695,18 +33674,22 @@ export {
   zipDecode,
   writeNew,
   writeJSON,
+  withRetries,
   verifyBytes,
   verify,
   validateURL,
+  validatePartsManifest,
   uuid,
   upload,
   unpack,
+  tuneTransfer,
   treeHash,
   tool,
   temporary,
   syntheticFixture,
   smokeTest,
   skillMetadata,
+  shareMultipart,
   share,
   sensitive,
   selfTest,
@@ -32714,15 +33697,19 @@ export {
   secretName,
   scriptCommand,
   safePath,
+  revokeTransfer,
   revoke,
+  resumeShare,
   restoreSkills,
   resolveInstallTarget,
   renderPrompt,
   remove,
+  receiveTransfer,
   receive,
   readJSON,
   readBytes,
   prepare,
+  parseTransferAny,
   parseTransfer,
   parseJSON,
   packageSkill,
@@ -32740,12 +33727,15 @@ export {
   installForHarness,
   inspectInstallation,
   inside,
+  httpOnce,
   http,
   hash,
   harnessID,
   exists,
   executeScript,
   encrypt,
+  downloadRange,
+  downloadCached,
   download,
   doctor,
   discoverSkills,
@@ -32756,6 +33746,7 @@ export {
   captureSkills,
   canonical,
   VERSION,
+  TRANSFER_DEFAULTS,
   STANDALONE,
   SKIP,
   SKILLS_ENGINE,

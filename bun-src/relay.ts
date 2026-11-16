@@ -4,11 +4,16 @@ import { BridgeError, exists, hash, isHash, LIMIT, need, newDir, now, parseJSON,
 import { unpack, verifyBytes } from "./bundle.ts";
 import { Encrypter, Decrypter, generateIdentity, identityToRecipient } from "age-encryption";
 import { STANDALONE } from "./runtime.ts";
+import { http, HTTP } from "./network.ts";
+export { http, httpOnce, withRetries } from "./network.ts";
+export type { HTTP, HTTPResult, HTTPPolicy } from "./network.ts";
 
 export const PROVIDERS: Record<string, { endpoint: string; hosts: string[]; ttls: string[] }> = {
   filebin: { endpoint: "https://filebin.net", hosts: ["filebin.net", "storage.filebin.net"], ttls: ["provider-default"] },
   litterbox: { endpoint: "https://litterbox.catbox.moe/resources/internals/api.php", hosts: ["litterbox.catbox.moe", "litter.catbox.moe"], ttls: ["1h", "12h", "24h", "72h"] },
   tmpfiles: { endpoint: "https://tmpfiles.org/api/v1/upload", hosts: ["tmpfiles.org"], ttls: ["1h", "6h", "24h", "48h"] },
+  tempsh: { endpoint: "https://temp.sh/upload", hosts: ["temp.sh"], ttls: ["provider-default"] },
+  uguu: { endpoint: "https://uguu.se/upload", hosts: ["uguu.se", "a.uguu.se", "files.uguu.se"], ttls: ["provider-default"] },
 };
 const IDENTITY = /^AGE-SECRET-KEY-1[0-9A-Z]{40,100}$/;
 const MAGIC = Buffer.from("age-encryption.org/v1\n");
@@ -37,38 +42,42 @@ export async function decrypt(cipher: string, identity: string, plain: string) {
 export function validateURL(url: any, provider: any): string {
   need(typeof provider === "string" && Object.hasOwn(PROVIDERS, provider) && typeof url === "string" && url.length <= 4096 && /^[\x21-\x7e]+$/.test(url), "URL", "Invalid provider or URL.");
   let u: URL; try { u = new URL(url); } catch { throw new BridgeError("URL", "Invalid URL."); }
-  need(u.protocol === "https:" && PROVIDERS[provider].hosts.includes(u.hostname) && ["", "443"].includes(u.port) && !u.username && !u.password && !u.hash, "URL", "URL outside selected provider's HTTPS allowlist."); return url;
+  need(u.protocol === "https:" && PROVIDERS[provider].hosts.includes(u.hostname) && ["", "443"].includes(u.port) && !u.username && !u.password && !u.hash, "URL", "URL outside selected provider's HTTPS allowlist.");
+  if (provider === "tempsh") need(/^\/[A-Za-z0-9]{1,80}\/[A-Za-z0-9][A-Za-z0-9._-]{0,180}$/.test(u.pathname) && !u.search, "URL", "Expected a Temp.sh file locator, not an upload/control endpoint.");
+  return url;
 }
-export type HTTPResult = { status: number; headers: Headers; data: Buffer };
-export type HTTP = (url: string, options?: RequestInit, limit?: number) => Promise<HTTPResult>;
-export const http: HTTP = async (url, options = {}, limit = LIMIT.meta) => {
-  let response: Response;
-  try { response = await fetch(url, { ...options, redirect: "manual", signal: AbortSignal.timeout(60000), headers: { "User-Agent": "session-bridge/" + VERSION, ...Object.fromEntries(new Headers(options.headers)) } }); }
-  catch { throw new BridgeError("NETWORK", "Relay connection or TLS verification failed."); }
-  const chunks: Uint8Array[] = []; let size = 0;
-  if (response.body) {
-    const reader = response.body.getReader();
-    try { while (true) { const part = await reader.read(); if (part.done) break; size += part.value.length; if (size > limit) { await reader.cancel(); throw new BridgeError("LIMIT", "HTTP response exceeds byte limit."); } chunks.push(part.value); } }
-    catch (e) { if (e instanceof BridgeError) throw e; throw new BridgeError("NETWORK", "Relay response was interrupted."); }
-  }
-  return { status: response.status, headers: response.headers, data: Buffer.concat(chunks) };
-};
 export async function download(url: string, provider: string, bytes: number, sha: string, request: HTTP = http) {
   validateURL(url, provider); need(Number.isSafeInteger(bytes) && bytes > 0 && bytes <= LIMIT.archive && isHash(sha), "TRANSFER", "Invalid ciphertext size/hash.");
+  const r = await downloadResponse(url, provider, bytes, request);
+  need(r.status === 200, "HTTP_STATUS", `Relay download returned HTTP ${r.status}.`);
+  need(r.data.length === bytes && hash(r.data) === sha, "HASH_MISMATCH", "Downloaded ciphertext differs from source."); return r.data;
+}
+async function downloadResponse(url: string, provider: string, bytes: number, request: HTTP, extraHeaders: Record<string, string> = {}) {
   let current = url, cookie = "", replayed = false;
   for (let i = 0; i < 5; i++) {
-    const headers: Record<string, string> = {};
+    const headers: Record<string, string> = { ...extraHeaders };
     if (provider === "filebin" && new URL(current).hostname === "filebin.net" && cookie) headers.Cookie = cookie;
-    const r = await request(current, { headers }, provider === "filebin" ? Math.max(bytes, 16384) : bytes);
+    const r = await request(current, { headers, ...(provider === "tempsh" ? { method: "POST" } : {}) }, Math.max(bytes, 16384), { totalMs: Math.min(1800000, Math.max(120000, Math.ceil(bytes / 4096) * 1000 + 60000)) });
     if ([301, 302, 303, 307, 308].includes(r.status)) { current = validateURL(new URL(r.headers.get("location") || "", current).href, provider); continue; }
     const html = (r.headers.get("content-type") || "").toLowerCase().includes("text/html");
     if (provider === "filebin" && new URL(current).hostname === "filebin.net" && r.status === 200 && html && r.headers.has("set-cookie") && !replayed) {
       cookie = r.headers.getSetCookie().map(s => s.split(";", 1)[0]).join("; "); replayed = true; continue;
     }
-    need(r.status === 200, "HTTP_STATUS", `Relay download returned HTTP ${r.status}.`);
-    need(!html, "HTML_RESPONSE", "Relay returned HTML instead of ciphertext."); need(r.data.length === bytes && hash(r.data) === sha, "HASH_MISMATCH", "Downloaded ciphertext differs from source."); return r.data;
+    need(r.status === 200 || r.status === 206, "HTTP_STATUS", `Relay download returned HTTP ${r.status}.`);
+    need(!html, "HTML_RESPONSE", "Relay returned HTML instead of ciphertext."); return r;
   }
   throw new BridgeError("REDIRECT", "Too many relay redirects.");
+}
+export async function downloadRange(url: string, provider: string, start: number, end: number, total: number, request: HTTP = http) {
+  validateURL(url, provider);
+  need(Number.isSafeInteger(start) && Number.isSafeInteger(end) && Number.isSafeInteger(total) && start >= 0 && end >= start && end < total && total <= LIMIT.archive, "TRANSFER", "Invalid ciphertext range.");
+  let result;
+  try { result = await downloadResponse(url, provider, end - start + 1, request, { Range: `bytes=${start}-${end}`, "Accept-Encoding": "identity" }); }
+  catch (error) { if (error instanceof BridgeError && error.code === "LIMIT") throw new BridgeError("RANGE_UNSUPPORTED", "The relay ignored a bounded range request."); throw error; }
+  need(result.status !== 200, "RANGE_UNSUPPORTED", "The relay returned a full object to a range request.");
+  need(result.status === 206, "HTTP_STATUS", `Relay range download returned HTTP ${result.status}.`);
+  need(result.headers.get("content-range") === `bytes ${start}-${end}/${total}` && result.data.length === end - start + 1,
+    "RANGE_RESPONSE", "Relay returned the wrong ciphertext range."); return result.data;
 }
 export async function upload(cipher: Buffer, provider: string, ttl: string, request: HTTP = http) {
   need(Object.hasOwn(PROVIDERS, provider) && PROVIDERS[provider].ttls.includes(ttl), "TTL", "Unsupported provider or retention period.");
@@ -76,20 +85,30 @@ export async function upload(cipher: Buffer, provider: string, ttl: string, requ
   const filename = uuid().replaceAll("-", "") + ".session.age";
   if (provider === "filebin") {
     const url = `https://filebin.net/${uuid().replaceAll("-", "")}/${filename}`;
-    const r = await request(url, { method: "POST", headers: { "Content-Type": "application/octet-stream", Accept: "application/json" }, body: cipher });
+    const r = await request(url, { method: "POST", headers: { "Content-Type": "application/octet-stream", Accept: "application/json" }, body: cipher }, LIMIT.meta,
+      { totalMs: Math.min(1800000, Math.max(120000, Math.ceil(cipher.length / 4096) * 1000 + 60000)) });
+    if (r.status === 409) {
+      // A retry can reach an object whose upload succeeded before its acknowledgement was lost.
+      await download(url, provider, cipher.length, hash(cipher), request);
+      return { provider, download_url: url, uploaded_at: now(), requested_ttl: ttl, reported_expires_at: null,
+        estimated_expires_at: new Date(Date.now() + 7 * 86400000).toISOString(), expiry_basis: "estimated_after_acknowledgement_loss",
+        deletion_support: "url-capability", locator_also_allows_delete: true };
+    }
     need(r.status === 201, "HTTP_STATUS", `Filebin upload returned HTTP ${r.status}; no ready prompt.`);
     const v = parseJSON(r.data); need(v?.file?.sha256 === hash(cipher) && v?.file?.bytes === cipher.length && typeof v?.bin?.expired_at === "string" && Number.isFinite(Date.parse(v.bin.expired_at)), "PROVIDER_RESPONSE", "Filebin metadata differs from ciphertext.");
     return { provider, download_url: url, uploaded_at: now(), requested_ttl: ttl, reported_expires_at: v.bin.expired_at, estimated_expires_at: null, expiry_basis: "provider_response", deletion_support: "url-capability", locator_also_allows_delete: true };
   }
-  const form = new FormData(); form.append(provider === "litterbox" ? "fileToUpload" : "file", new Blob([cipher], { type: "application/octet-stream" }), filename);
+  const form = new FormData(); form.append(provider === "litterbox" ? "fileToUpload" : provider === "uguu" ? "files[]" : "file", new Blob([cipher], { type: "application/octet-stream" }), filename);
   if (provider === "litterbox") { form.append("reqtype", "fileupload"); form.append("time", ttl); } else form.append("expire", String(parseInt(ttl) * 3600));
-  const r = await request(PROVIDERS[provider].endpoint, { method: "POST", body: form });
+  const r = await request(PROVIDERS[provider].endpoint, { method: "POST", body: form }, LIMIT.meta,
+    { totalMs: Math.min(1800000, Math.max(120000, Math.ceil(cipher.length / 4096) * 1000 + 60000)) });
   need([200, 201].includes(r.status), "HTTP_STATUS", `Relay upload returned HTTP ${r.status}; no ready prompt.`);
   let url = r.data.toString("utf8").trim();
+  if (provider === "uguu") { const v = parseJSON(r.data); need(v?.success === true && v.files?.length === 1 && typeof v.files[0].url === "string", "PROVIDER_RESPONSE", "No Uguu upload confirmation."); url = v.files[0].url; }
   if (provider === "tmpfiles") { const v = parseJSON(r.data); need(v?.status === "success", "PROVIDER_RESPONSE", "No upload confirmation."); const locator = String(v.data?.url || "").replace(/^http:\/\/tmpfiles\.org\//, "https://tmpfiles.org/"); validateURL(locator, provider); url = "https://tmpfiles.org/dl" + new URL(locator).pathname; }
   validateURL(url, provider);
   return { provider, download_url: url, uploaded_at: now(), requested_ttl: ttl, reported_expires_at: null,
-    estimated_expires_at: new Date(Date.now() + parseInt(ttl) * 3600000).toISOString(), expiry_basis: "estimated_from_requested_ttl", deletion_support: "unsupported" };
+    estimated_expires_at: new Date(Date.now() + (provider === "tempsh" ? 72 : provider === "uguu" ? 3 : parseInt(ttl)) * 3600000).toISOString(), expiry_basis: "estimated_from_provider_policy", deletion_support: "unsupported" };
 }
 export function renderPrompt(transfer: any) {
   // Restore credentials travel with the prompt; operational upload metadata stays in the receipt.

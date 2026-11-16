@@ -4,9 +4,11 @@
 
 ## 1. 优先检查已有安装
 
-先看当前 harness 的 Skill 列表及其实际目录。如果已有 `session-bridge`，找到其中的 `session-bridge`（macOS）或 `session-bridge.exe`（Windows），用绝对路径执行 `doctor`。当 `ready`、`standalone` 为 true，并有 `skills_engine.package = skills` 与 `compatibility.installation_receipt_version = 1` 时，执行该程序的 `install`。它会识别当前 harness、检查文件完整性并复用可用安装。
+先看当前 harness 的 Skill 列表及其实际目录。如果已有 `session-bridge`，用其可执行文件的绝对路径执行 `doctor`。新版需要 `ready`、`standalone` 为 true，`skills_engine.package = skills`、`compatibility.installation_receipt_version = 1`，且 `compatibility.transfer_versions` 包含 2、`transfer.resumable_uploads = true`。满足时执行 `install --require-transfer-version 2`，识别当前 harness、校验文件并复用安装。
 
-读取返回的 `path/SKILL.md`，在本次任务中直接使用。宿主原生目录可能需要刷新才能出现在下一次 Skill 列表中；本次可直接读取文件继续。不要仅凭同名文件夹认定可用，不要默认升级一个健康版本。用户要求升级时才传 `--replace`。
+缺少分片/断点恢复能力的旧版不能当作新版可用安装，继续运行下面的引导；它会下载新版，并通过 `--require-transfer-version 2` 先备份再升级能力不足的安装。能力已满足则复用，不按版本号盲目升级。`--replace` 用于明确替换健康兼容版本。
+
+读取返回的 `path/SKILL.md`，在本次任务中直接使用。宿主目录可能需要刷新才会出现在下一次 Skill 列表中；本次可直接读取文件继续。不要仅凭同名文件夹认定可用。
 
 如果没有找到可用程序，继续首次安装。引导脚本也会进行有限的本地路径发现；指定自定义目录时使用 `--skills-dir` / `-SkillsDir`。
 
@@ -66,7 +68,9 @@ SDK 在安装阶段只处理本地内嵌资源，遥测关闭。不要用 `npx s
 
 读取安装结果中的 `path/SKILL.md`，再按用户目标选择导出或恢复。
 
-导出时，整理用户要求、最新修正和下一步；只打包当前可获得的原始历史、附件、文件与有使用证据的 Skill。主页的源端打包提示词已明确要求远端交接：本地加密后上传 Filebin，使用服务默认期限，回读校验成功后返回目标端提示词。
+导出时，整理用户要求、最新修正和下一步；只打包当前可获得的原始历史、附件、文件与有使用证据的 Skill。主页提示词已授权远端交接：本地加密，默认 `share --provider auto --ttl provider-default`，根据当前网络对 Filebin/Temp.sh 的真实上传和回读测速选择站点，自动分片、校验后返回目标端提示词。分片大小和并发参考首片吞吐；可显式指定站点或参数。
+
+保留 ZIP、密钥和检查点。网络中断或 harness 命令超时后使用 `resume-share --out <原目录>`，不要重新导出、换密钥或修改安装代码来重来。工具支持异步执行时持续轮询原进程；进程被杀后，在检查点有新进展时继续恢复，连续两次无进展或永久拒绝则报告实际错误。已上传的旧版大包也可用原目录的密文、密钥和 receipt 继续回读；Filebin 支持校验过的 Range 分段缓存。
 
 目标端提示词只需一句“用 https://github.com/lyzMaster/session-bridge 恢复并继续这个任务。”和完整交接块；将交接 JSON 压成一行，不附安装步骤、命令和格式说明。复用旧版程序时，也可保留其交接数据不变，精简外围文字。关键缺失和有效期可在提示词外简短补充，不能把失败的上传当作成功。
 

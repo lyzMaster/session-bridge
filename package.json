@@ -1,11 +1,11 @@
 {
   "name": "session-bridge-build",
-  "version": "0.5.2",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "bun build.ts",
-    "test": "bun test ./session-bridge/tests/bridge.test.ts ./session-bridge/tests/installer.test.ts",
+    "test": "bun test ./session-bridge/tests/bridge.test.ts ./session-bridge/tests/installer.test.ts ./session-bridge/tests/transport.test.ts",
     "build:standalone": "bun build.ts --standalone",
     "build:site": "bun scripts/build-site.ts",
     "test:release": "bun test ./tests/distribution.test.ts",

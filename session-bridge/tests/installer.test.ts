@@ -104,3 +104,12 @@ test("a healthy linked installation can be reused without changing its link or t
   expect(readBytes(path.join(original.path, "installation.json"))).toEqual(before);
   await expect(installSkill(source, registry, true)).rejects.toThrow();
 });
+test("requiring multipart support upgrades a healthy legacy install and keeps its backup", async () => {
+  const legacy = path.join(root, "legacy"), registry = path.join(root, "skills"); fs.cpSync(source, legacy, { recursive: true });
+  fs.writeFileSync(path.join(legacy, "scripts/session-bridge.ts"), "console.log(JSON.stringify({ready:true,version:'0.5.2',standalone:false,crypto_format:'age-v1-x25519',age_install_required:false,compatibility:{transfer_versions:[1],read_bundle_versions:['1.1'],installation_receipt_version:1}}));\n");
+  const first = await installSkill(legacy, registry); expect(first.version).toBe("0.5.2");
+  expect((await installSkill(source, registry)).status).toBe("reused");
+  const upgraded = await installSkill(source, registry, false, { required_transfer_version: 2 });
+  expect(upgraded.status).toBe("upgraded"); expect(upgraded.version).toBe(VERSION); expect(fs.existsSync(path.join(upgraded.backup!, "scripts/session-bridge.ts"))).toBe(true);
+  expect((await installSkill(source, registry, false, { required_transfer_version: 2 })).status).toBe("reused");
+});

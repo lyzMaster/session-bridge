@@ -40,7 +40,7 @@ export function assembleRelease(platformsDirectory: string, outputDirectory: str
     verification[target] = report;
   }
   const manifest = validateRelease({ schema_version: 1, repository: PROJECT.repository, version: VERSION, tag: "v" + VERSION,
-    minimum_bootstrap_version: "0.4.0", protocol: { transfer: [1], bundles: ["1.0", "1.1"] }, platforms,
+    minimum_bootstrap_version: "0.6.0", protocol: { transfer: [1, 2], bundles: ["1.0", "1.1"] }, platforms,
     verification: Object.fromEntries(Object.entries(verification).map(([k, v]) => [k, { status: v.status, platform: v.platform, arch: v.arch }])) });
   fs.writeFileSync(path.join(outputDirectory, "release-manifest.json"), JSON.stringify(manifest, null, 2) + "\n");
   fs.writeFileSync(path.join(outputDirectory, "native-verification.json"), JSON.stringify(verification, null, 2) + "\n");
