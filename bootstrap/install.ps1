@@ -78,8 +78,14 @@ try {
       $Artifact.sha256 -notmatch '^[a-f0-9]{64}$' -or $Artifact.bytes -le 0 -or $Artifact.bytes -gt 160000000) { throw 'Invalid Windows artifact metadata.' }
   $Executable = [IO.Path]::Combine($TempDirectory,$Artifact.filename)
   Invoke-WebRequest -UseBasicParsing -Uri $Artifact.url -OutFile $Executable -TimeoutSec 600
-  if ((Get-Item -LiteralPath $Executable).Length -ne $Artifact.bytes -or
-      (Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash.ToLowerInvariant() -ne $Artifact.sha256) { throw 'Downloaded executable failed integrity verification.' }
+  # Hash through the OS crypto API, independent of PowerShell module auto-discovery.
+  $HashAlgorithm = [Security.Cryptography.SHA256]::Create()
+  $InputStream = [IO.File]::OpenRead($Executable)
+  try {
+    if ($InputStream.Length -ne $Artifact.bytes) { throw 'Downloaded executable has the wrong byte count.' }
+    $ActualHash = [BitConverter]::ToString($HashAlgorithm.ComputeHash($InputStream)).Replace('-','').ToLowerInvariant()
+  } finally { $InputStream.Dispose(); $HashAlgorithm.Dispose() }
+  if ($ActualHash -ne $Artifact.sha256) { throw 'Downloaded executable failed integrity verification.' }
   & $Executable install @Forward
   if ($LASTEXITCODE -ne 0) { throw "Installer returned exit code $LASTEXITCODE" }
 } finally { Remove-Item -LiteralPath $TempDirectory -Recurse -Force -ErrorAction SilentlyContinue }
