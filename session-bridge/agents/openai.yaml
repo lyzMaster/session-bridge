@@ -1,0 +1,3 @@
+interface:
+  display_name: "Session Bridge"
+  short_description: "Portable task handoffs with history, files and used Skills"

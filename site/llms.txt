@@ -1,0 +1,11 @@
+# Session Bridge
+
+> Transfer agent tasks between harnesses with context, attachments, workspace files and used Skills. Reuse a healthy installation or install one standalone executable. No external runtime is required.
+
+- Repository: https://github.com/lyzMaster/session-bridge
+- Agent installation and continuation: https://raw.githubusercontent.com/lyzMaster/session-bridge/main/INSTALL.md
+- Skill instructions: https://raw.githubusercontent.com/lyzMaster/session-bridge/main/session-bridge/SKILL.md
+- Commands: https://raw.githubusercontent.com/lyzMaster/session-bridge/main/session-bridge/references/commands.md
+- Release manifest: https://github.com/lyzMaster/session-bridge/releases/latest/download/release-manifest.json
+
+Read INSTALL.md first. Prefer an existing compatible local executable. After install/reuse, read the installed SKILL.md and continue the user's task. Never place a transfer identity in command arguments or send task contents to this static homepage.

@@ -1,0 +1,20 @@
+{
+  "name": "session-bridge-build",
+  "version": "0.5.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "bun build.ts",
+    "test": "bun test ./session-bridge/tests/bridge.test.ts ./session-bridge/tests/installer.test.ts",
+    "build:standalone": "bun build.ts --standalone",
+    "build:site": "bun scripts/build-site.ts",
+    "test:release": "bun test ./tests/distribution.test.ts",
+    "test:native": "bun scripts/native-smoke.ts"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "age-encryption": "0.3.1",
+    "skills": "1.9.0",
+    "@vercel/detect-agent": "1.2.7"
+  }
+}

@@ -1,0 +1,11 @@
+/verification/
+/dist/
+**/__pycache__/
+*.pyc
+/node_modules/
+/site-dist/
+/publication/
+/TEST_REPORT*.md
+/DESIGN.md
+/RELAY.md
+.DS_Store

@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f5f5ed">
+  <meta name="description" content="把上下文、附件、工作文件和用过的 Skill 一起带走。Session Bridge 让你在另一台电脑、另一个 harness 中继续 agent 任务。">
+  <meta property="og:title" content="Session Bridge — 换一台电脑，继续同一件事">
+  <meta property="og:description" content="一段提示词，带走任务。Windows 与 macOS 单文件，无需额外运行环境。">
+  <title>Session Bridge — 换一台电脑，继续同一件事</title>
+  <link rel="icon" href="./assets/mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./styles.css">
+  <script src="./app.js" defer></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">跳到主要内容</a>
+  <header class="header">
+    <a class="brand" href="#" aria-label="Session Bridge 首页"><img src="./assets/mark.svg" alt="" width="32" height="32"><span>session<span class="brand-light">bridge</span></span></a>
+    <nav aria-label="主导航"><a href="#how">如何接续</a><a href="#install">开始使用</a><a href="#questions">常见问题</a></nav>
+    <a class="github-link" href="https://github.com/lyzMaster/session-bridge" target="_blank" rel="noopener noreferrer"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 .9a11.1 11.1 0 0 0-3.5 21.6c.5.1.7-.2.7-.5v-2.1c-2.9.6-3.5-1.2-3.5-1.2-.5-1.3-1.3-1.6-1.3-1.6-1-.7.1-.7.1-.7 1.1.1 1.7 1.1 1.7 1.1 1 1.7 2.5 1.2 3.1.9.1-.7.4-1.2.7-1.5-2.3-.3-4.8-1.2-4.8-5.4 0-1.2.4-2.2 1.1-3-.1-.3-.5-1.4.1-2.9 0 0 .9-.3 3.1 1.1a10.7 10.7 0 0 1 5.6 0c2.1-1.4 3.1-1.1 3.1-1.1.6 1.5.2 2.6.1 2.9.7.8 1.1 1.8 1.1 3 0 4.3-2.5 5.1-4.9 5.4.4.3.7 1 .7 2v3c0 .3.2.6.7.5A11.1 11.1 0 0 0 12 .9Z"/></svg><span>GitHub</span><span aria-hidden="true">↗</span></a>
+  </header>
+  <main id="main">
+    <section class="hero section-wrap">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="live-dot"></span> YOUR WORK. CONTINUED.</div>
+        <h1>换一台电脑，<br>继续<span class="underlined">同一件事</span>。</h1>
+        <p class="lead">把上下文、附件、工作文件和用过的 Skill 一起带走。<br class="desktop-break">一段提示词，在另一个 harness 接着做。</p>
+        <div class="hero-actions"><button class="button primary" data-copy="prompt"><span>复制给你的 Agent</span><span aria-hidden="true">↗</span></button><a class="button secondary" href="#install">下载单文件 <span aria-hidden="true">↓</span></a></div>
+        <div class="hero-meta"><span class="mini-platform">⊞ Windows</span><span>◒ macOS</span><span class="meta-divider"></span><span>无需 Node · Bun · Python</span></div>
+      </div>
+      <div class="hero-art" aria-label="任务在两台电脑之间通过加密包接续的流程示意">
+        <div class="art-grid"></div>
+        <div class="session-card source-card"><div class="window-bar"><span class="window-dots"><i></i><i></i><i></i></span><span>SOURCE / macOS</span><span class="status-pip"></span></div><div class="card-content"><p class="code-kicker">CURRENT SESSION</p><div class="task-heading"><span class="task-icon">↗</span><span>把正在做的事带走</span></div><div class="file-row"><span>≡</span> HANDOFF.md <em>任务与下一步</em></div><div class="file-row"><span>▧</span> attachments/ <em>图片与附件</em></div><div class="file-row"><span>⌘</span> workspace/ <em>当前工作文件</em></div><div class="file-row"><span>✧</span> skills/ <em>实际用过的能力</em></div><div class="terminal-line"><span>$</span> session-bridge share<span class="cursor-block"></span></div></div></div>
+        <div class="bridge-track"><svg viewBox="0 0 500 220" preserveAspectRatio="none" aria-hidden="true"><path d="M66 25V95Q66 120 91 120H389Q414 120 414 145V202"/></svg><div class="transfer-packet"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10V7a5 5 0 0 1 10 0v3M5 10h14v11H5z"/></svg><div><b>task.session.zip.age</b><span>本地加密 · 密文中转</span></div><span class="packet-check">✓</span></div><span class="transfer-label">ONE CONTINUATION PROMPT</span></div>
+        <div class="session-card target-card"><div class="window-bar"><span class="window-dots"><i></i><i></i><i></i></span><span>TARGET / Windows</span><span class="small-badge">READY</span></div><div class="card-content target-content"><div class="restored-line"><span>✓</span><div><b>任务已恢复，可以继续。</b><small>上下文、文件与 Skill，已经就位。</small></div></div><div class="next-action"><span>NEXT ACTION</span><p>读取接续说明，完成下一步。</p><span class="mini-cursor">▍</span></div></div></div>
+        <span class="art-caption">工作流示意 · 支持不同电脑与 harness</span>
+      </div>
+    </section>
+    <section class="compatibility section-wrap" aria-label="兼容说明"><p>让任务跨过工具的边界</p><div class="tool-names"><span>Codex</span><span>Claude Code</span><span>Cursor</span><span>Gemini CLI</span><span class="more-tools">以及支持文件与命令的 harness <span aria-hidden="true">↗</span></span></div></section>
+    <section class="how-section section-wrap" id="how"><div class="section-heading"><div><span class="eyebrow muted">01 / THE HANDOFF</span><h2>带走进度，<br>也带走继续工作的条件。</h2></div><p>接续说明告诉 Agent 要做什么。<br>原始资料与 Skill 帮它真正做下去。</p></div>
+      <div class="steps"><article><div class="step-number">01 <span>↗</span></div><h3>在源端打包</h3><p>保留需求、最新修正、决策与下一步，收集可获得的历史、附件、工作文件及已用 Skill。</p><div class="step-tag">上下文 + 文件 + Skill</div></article><article><div class="step-number">02 <span>⇢</span></div><h3>复制一段提示词</h3><p>本地加密后，将密文放到临时中转站。校验下载成功，再生成包含下载信息和私钥的提示词。</p><div class="step-tag">私钥留在交接提示词中</div></article><article><div class="step-number">03 <span>✓</span></div><h3>在目标端继续</h3><p>下载、校验、解密，恢复到新目录。先读接续说明和相关 Skill，再接着完成任务。</p><div class="step-tag">原始证据与工作区分开</div></article></div>
+    </section>
+    <section class="install-section" id="install"><div class="section-wrap install-layout"><div class="install-copy"><span class="eyebrow">02 / GET STARTED</span><h2>把地址交给 Agent，<br>从这里开始。</h2><p>已有可用安装就直接复用。<br>没有安装，再下载并校验对应系统的程序。</p><div class="install-points"><span><i>✓</i> 自动识别当前 harness 的安装目录</span><span><i>✓</i> 每个平台一个可执行文件</span><span><i>✓</i> 安装完成，直接读取 Skill 开始工作</span></div><a class="text-link" href="https://github.com/lyzMaster/session-bridge/blob/main/INSTALL.md" target="_blank" rel="noopener noreferrer">阅读完整安装引导 <span>↗</span></a></div>
+      <div class="install-panel"><div class="panel-tabs" role="tablist" aria-label="安装方式"><button role="tab" aria-selected="true" aria-controls="agent-panel" id="agent-tab" data-tab="agent">交给 Agent</button><button role="tab" aria-selected="false" aria-controls="manual-panel" id="manual-tab" data-tab="manual" tabindex="-1">手动安装</button><span class="version-chip" data-version>v0.5.0</span></div>
+        <div id="agent-panel" role="tabpanel" aria-labelledby="agent-tab"><div class="prompt-header"><span>复制这段话，或直接分享 GitHub 地址</span><button class="icon-button" data-copy="prompt" aria-label="复制安装提示词">⧉</button></div><pre class="agent-prompt" id="agent-prompt">请使用 https://github.com/lyzMaster/session-bridge 。
+先按 INSTALL.md 复用可用安装；没有安装时再下载校验并安装。
+然后读取安装目录中的 SKILL.md，继续当前任务。</pre><div class="reuse-demo"><span class="reuse-dot"></span><span>可用安装 → 复用</span><span>未安装 → 校验后安装</span></div><button class="button panel-copy" data-copy="prompt">复制，去继续工作 <span>↗</span></button></div>
+        <div id="manual-panel" role="tabpanel" aria-labelledby="manual-tab" hidden><p class="manual-intro">下载对应文件，在终端中执行 <code>install</code>。</p><div class="downloads"><a class="download-card" data-download="macos-universal" href="https://github.com/lyzMaster/session-bridge/releases/latest"><span class="download-icon">◒</span><div><b>macOS Universal</b><small>Apple Silicon / Intel · macOS 13+</small></div><span>↓</span></a><a class="download-card" data-download="windows-x64" href="https://github.com/lyzMaster/session-bridge/releases/latest"><span class="download-icon">⊞</span><div><b>Windows x64</b><small>单文件 .exe · 内嵌运行时</small></div><span>↓</span></a></div><div class="command-picker"><button data-os="macos" aria-pressed="true">macOS</button><button data-os="windows" aria-pressed="false">Windows</button><button class="icon-button" data-copy="command" aria-label="复制安装命令">⧉</button></div><pre class="manual-command" id="manual-command">chmod +x ./session-bridge-macos-universal
+./session-bridge-macos-universal install</pre><a class="checksum-link" data-checksums href="https://github.com/lyzMaster/session-bridge/releases/latest">查看版本与 SHA-256 校验值 ↗</a></div>
+      </div></div></section>
+    <section class="details-section section-wrap"><div class="detail-copy"><span class="eyebrow muted">BUILT FOR CONTINUITY</span><h2>离开的是环境，<br>留下的是工作依据。</h2><p>恢复后的文件结构保持清晰，方便 Agent 查证需求、追踪原始资料，并在独立工作区继续修改。</p><div class="detail-note"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2 3 6v6c0 5 9 10 9 10s9-5 9-10V6zM8 12l3 3 5-6"/></svg><span>加密在本地完成。<br>中转站接收到的是密文。</span></div></div><div class="file-tree"><div class="tree-top"><span>▱ recovered-task/</span><span>PORTABLE BUNDLE</span></div><div><code>├─ START_HERE.md</code><span>从这里接续</span></div><div><code>├─ SKILL_INDEX.md</code><span>已用能力索引</span></div><div><code>├─ bundle/</code><span>原始上下文与证据</span></div><div class="tree-highlight"><code>├─ workspace/</code><span>继续修改的工作区</span></div><div><code>├─ skills/</code><span>脚本、资源与说明</span></div><div><code>└─ recovery/</code><span>校验、路径与缺失报告</span></div></div></section>
+    <section class="faq-section section-wrap" id="questions"><div class="section-heading"><div><span class="eyebrow muted">03 / GOOD TO KNOW</span><h2>开始之前，你可能想知道。</h2></div><a class="text-link" href="https://github.com/lyzMaster/session-bridge/issues" target="_blank" rel="noopener noreferrer">还有问题？提交 Issue ↗</a></div><div class="faq-list">
+      <details><summary>任意 harness 都能恢复完整会话吗？<span>+</span></summary><p>使用通用文件和接续说明恢复工作。完整程度取决于源端能提供哪些历史、附件和文件；缺失会记录在报告中。目标端需要能下载、读写文件并执行命令。隐藏推理、模型内部状态、活动进程与登录权限不会迁移。</p></details>
+      <details><summary>需要先安装 Bun、Node 或 age 吗？<span>+</span></summary><p>使用发布的单文件程序时无需额外安装这些环境。Mac 和 Windows 引导使用系统自带工具，程序内部包含 Bun、加密与 Skill 安装能力。其他 Skill 自身依赖的原生工具、第三方包或 MCP 权限仍需目标端具备。</p></details>
+      <details><summary>怎样保证装到当前 harness，而不是其他工具？<span>+</span></summary><p>安装器使用当前运行信号和上游目录规则，明确的目标或目录优先。无法识别、多个候选或强信号冲突时，会要求显式指定，不向所有检测到的产品安装。使用 detect-harness 可以先预览选择。</p></details>
+      <details><summary>交接提示词和临时文件会保留多久？<span>+</span></summary><p>交接提示词包含下载信息与解密私钥，请只交给接收方。目前已接入并验证 Filebin，期限以服务端响应为准，通常约七天。删除下载入口无法撤回别人已经下载的副本；项目主页不保存你的任务包或密钥。</p></details>
+      <details><summary>本地已经装过，会被覆盖吗？<span>+</span></summary><p>可用版本会通过文件校验和本地健康检查，直接复用而不改文件。受管理的损坏安装会先备份再修复。升级健康版本需要明确使用 --replace；健康共享目录链接只读复用，不通过链接替换。</p></details>
+    </div></section>
+    <section class="closing section-wrap"><span class="eyebrow muted">PICK UP WHERE YOU LEFT OFF</span><h2>下一个窗口，<br>接着上一步。</h2><button class="button primary" data-copy="prompt">复制给你的 Agent <span>↗</span></button></section>
+  </main>
+  <footer class="footer section-wrap"><a class="brand" href="#"><img src="./assets/mark.svg" alt="" width="25" height="25"><span>session<span class="brand-light">bridge</span></span></a><span>MIT · <span data-version>v0.5.0</span> · Made for work in progress.</span><div><a href="https://github.com/lyzMaster/session-bridge">源码 ↗</a><a href="https://agentskills.io/specification">Agent Skills ↗</a></div></footer>
+  <div class="toast" role="status" aria-live="polite" id="toast" hidden></div>
+</body>
+</html>
