@@ -19,10 +19,14 @@ function invoke(offline: boolean) {
   return JSON.parse(Buffer.from(child.stdout).toString());
 }
 try {
+  const coldStarted = Date.now();
   const first = invoke(false); assert(first.status === "installed" && first.standalone && first.version === VERSION, "First public installation did not complete");
+  const coldInstallMs = Date.now() - coldStarted;
   const installed = path.join(registry, "session-bridge"), receipt = fs.readFileSync(path.join(installed, "installation.json"));
+  const reuseStarted = Date.now();
   const second = invoke(true); assert(second.status === "reused" && fs.readFileSync(path.join(installed, "installation.json")).equals(receipt), "Offline reuse changed the installation");
   const report = { status: "passed", version: VERSION, platform: process.platform, arch: process.arch, cold_public_install: true,
-    offline_reuse: true, installation_unchanged: true, external_runtime_required: false, system_shell: windows ? "Windows PowerShell" : "Bash" };
+    offline_reuse: true, installation_unchanged: true, external_runtime_required: false, system_shell: windows ? "Windows PowerShell" : "Bash",
+    cold_install_ms: coldInstallMs, offline_reuse_ms: Date.now() - reuseStarted };
   console.log(JSON.stringify(report));
 } finally { fs.rmSync(temp, { recursive: true, force: true }); }

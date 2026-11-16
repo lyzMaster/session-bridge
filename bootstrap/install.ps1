@@ -10,6 +10,8 @@ param(
   [switch]$Upgrade
 )
 $ErrorActionPreference = 'Stop'
+# Avoid the PowerShell 5.1 progress renderer slowing noninteractive binary downloads.
+$ProgressPreference = 'SilentlyContinue'
 $Repository = 'lyzMaster/session-bridge'
 if ($env:OS -ne 'Windows_NT') { throw 'Use install.sh on macOS.' }
 if ($Release -ne 'latest' -and $Release -notmatch '^v\d+\.\d+\.\d+$') { throw 'Invalid release tag.' }
