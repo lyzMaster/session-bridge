@@ -1,47 +1,47 @@
 # Session Bridge
 
-把一件正在进行的 agent 任务，带到另一台电脑、另一个 harness，继续做下去。
+Take an ongoing agent task to another machine and another harness, and pick up right where you left off.
 
-[项目主页](https://lyzmaster.github.io/session-bridge/) · [下载与版本](https://github.com/lyzMaster/session-bridge/releases) · [安装引导](INSTALL.md) · [使用命令](session-bridge/references/commands.md)
+**English** · [简体中文](README.zh-CN.md) · [Homepage](https://lyzmaster.github.io/session-bridge/) · [Releases](https://github.com/lyzMaster/session-bridge/releases) · [Setup Guide](INSTALL.md) · [Commands](session-bridge/references/commands.md)
 
-## 给收到这个 GitHub 地址的 agent
+## For an Agent Receiving This GitHub URL
 
-**请先读取 [INSTALL.md](INSTALL.md)。** 检查当前 harness 中是否已有可用的 Session Bridge；可用则复用，缺失时下载、校验对应系统的单文件程序并安装。安装结果会给出 Skill 目录，读取该目录下的 `SKILL.md`，然后继续用户当前的任务。用户已给出目标时无需再次询问；仅收到地址且没有具体任务时，询问是导出当前任务还是恢复交接提示词。
+**Read [INSTALL.md](INSTALL.md) first.** Check whether a usable Session Bridge installation already exists in the current harness; reuse it if healthy, or download, verify, and install the standalone executable for this OS. The installer outputs the Skill directory—read `SKILL.md` inside it and continue with the user's current task. Do not ask again if the user has already provided a goal; if only the repository URL was given with no task, ask whether to export the current session or restore a continuation prompt.
 
-Windows x64、macOS 13+（Intel / Apple Silicon）每个平台只需一个可执行文件，运行无需另装 Bun、Node、Git、Python、age 或 npm 包。目标 harness 需要具备联网、文件读写和命令执行能力。
+One standalone executable each for Windows x64 and macOS 13+ (Intel / Apple Silicon)—no separate Bun, Node, Git, Python, age, or npm packages required. The target harness needs network access, file read/write, and command execution.
 
-## 一段提示词，接着工作
+## One Prompt to Continue Your Work
 
-1. 源端整理可获得的历史、最新修正、工作文件、附件和使用过的 Skill。
-2. 本地打包与 age 加密，只将密文上传到公共临时文件中转站，回读校验后生成交接提示词。
-3. 目标端粘贴提示词，下载、校验、解密，在新目录恢复原始证据、工作区和 Skill，再继续任务。
+1. The source side gathers available history, latest corrections, workspace files, attachments, and Skills that were actually used.
+2. Everything is packaged and encrypted locally with age; only ciphertext is uploaded to a public temporary file relay, verified by readback, and turned into a short continuation prompt.
+3. The target side pastes the prompt, downloads, verifies, and decrypts the bundle, restores the original evidence, workspace, and Skills into a new directory, and resumes the task.
 
-交接提示词同时携带下载能力与解密私钥。请只交给接收方；主页不接收任务内容或密钥。默认用首片加密数据对 Filebin 和 Temp.sh 实测上传、回读，选择先通过校验的站点。Filebin 期限以服务响应为准，通常约七天；Temp.sh 的三天策略按估计标注。
+The continuation prompt carries both the download capability and the decryption private key. Share it only with the recipient; the project homepage never receives task contents or keys. By default, the first encrypted chunk is probed against both Filebin and Temp.sh for upload and readback, selecting whichever passes verification first. Filebin retention follows the server response (typically ~7 days); Temp.sh uses an estimated 3-day policy.
 
-## 安装或复用
+## Install or Reuse
 
-在 SOURCE 当前会话中发送下面这段话，默认完成打包和加密上传，再生成发给 TARGET 的短提示词：
-
-```text
-请使用 https://github.com/lyzMaster/session-bridge ，按 INSTALL.md 安装或复用，缺少分片和断点恢复能力的旧版先升级。
-将当前 session 的上下文、附件、工作文件和实际用过的 Skill 打包，本地加密后按当前网络实测自动选择中转站，分片上传并回读校验；中断后从原检查点继续。
-成功后只输出一段发给 TARGET 的简短接续提示词：一句“恢复并继续这个任务”、项目地址和完整交接凭证（压成一行），省略安装步骤、命令和格式说明。
-```
-
-也可以从 [Releases](https://github.com/lyzMaster/session-bridge/releases/latest) 手动下载对应程序，执行 `install`。`detect-harness` 可预览目录选择，`--harness`、`--skills-dir` 可显式指定；`--scope project --cwd <项目目录>` 安装到项目。可用版本返回 `reused`，明确升级使用 `--replace`。默认选择当前 harness，不会向检测到的所有产品安装。
-
-## 导出与恢复
+Send this prompt in your SOURCE session to package, encrypt, and upload by default, then generate a short prompt for TARGET:
 
 ```text
-用 Session Bridge 导出当前任务，带上附件、工作文件和实际用过的 Skill。
-本地加密后实测选择中转站、分片上传，生成可在另一台电脑继续任务的一段提示词。
+Use https://github.com/lyzMaster/session-bridge following INSTALL.md to install or reuse Session Bridge, upgrading older versions that lack multipart and checkpoint resume support.
+Package the current session's context, attachments, workspace files, and Skills actually used, encrypt locally, automatically select a relay by live upload/readback probing, upload in parts with readback verification, and resume from the saved checkpoint if interrupted.
+Once verified, output only a concise continuation prompt for TARGET: a line saying "Restore and continue this task", the project URL, and the complete transfer credential block (compacted onto one line), omitting install steps, commands, and format explanations.
 ```
 
-目标端直接使用生成的提示词。它包含项目地址，因此未安装的接收方也能读取安装引导。完整参数见 [命令说明](session-bridge/references/commands.md)，覆盖范围见 [协议说明](session-bridge/references/protocol.md)。
+You can also download the executable manually from [Releases](https://github.com/lyzMaster/session-bridge/releases/latest) and run `install`. Use `detect-harness` to preview directory selection, `--harness` or `--skills-dir` to override explicitly, and `--scope project --cwd <project-dir>` to install into a project. Healthy installations return `reused`; use `--replace` to explicitly upgrade. By default, only the current harness is targeted rather than installing into every detected product.
 
-“跨 harness”表示使用通用文件和接续说明。实际可导出内容取决于源端提供的历史与文件访问能力。隐藏推理、模型状态、活动进程和登录权限不会迁移。携带 Skill 的文件不等于安装其外部解释器、包或 MCP 服务；兼容的 JS/TS helper 可用主程序的 `run-script` 执行。
+## Export and Restore
 
-## 开发与发布
+```text
+Use Session Bridge to export the current task with attachments, workspace files, and Skills actually used.
+Encrypt locally, probe and choose the fastest verified relay, upload in parts, and generate a single continuation prompt for another machine.
+```
+
+The target side uses the generated prompt directly. Because it includes the project URL, an unconfigured recipient can also read the setup guide. See [Commands](session-bridge/references/commands.md) for all flags and [Protocol](session-bridge/references/protocol.md) for coverage details.
+
+"Cross-harness" works through portable files and handoff instructions. Actual export coverage depends on the history and file access provided by the source harness. Hidden reasoning, internal model state, active processes, and login credentials are not migrated. Carrying a Skill's files does not install its external interpreters, packages, or MCP servers; compatible JS/TS helpers can run through the main executable's `run-script` command.
+
+## Development and Release
 
 ```sh
 bun install --frozen-lockfile --ignore-scripts
@@ -51,6 +51,6 @@ bun run test:release
 bun run build:standalone
 ```
 
-开发使用 Bun 1.3.6；分发程序包含运行时。GitHub Actions 在 Windows 和 macOS 上构建并直接运行成品，发布前校验哈希和原生自测结果。Releases 承载程序，Pages 承载静态主页。版本清单、主页下载信息和引导脚本都指向固定版本资源。
+Development uses Bun 1.3.6; distributed executables bundle the runtime. GitHub Actions builds and executes the standalone binaries on Windows and macOS, verifying checksums and native self-tests before publishing. Releases host the binaries and Pages hosts the static homepage. Release manifests, homepage download links, and bootstrap scripts all point to pinned versioned assets.
 
-源码采用 [MIT](LICENSE)。运行时和依赖许可通过 `licenses` 命令查看；使用了 [age-encryption](https://github.com/FiloSottile/typage)、[vercel-labs/skills](https://github.com/vercel-labs/skills) 与 [Agent Skills 格式](https://agentskills.io/specification)。
+Source code is licensed under [MIT](LICENSE). View runtime and dependency notices via the `licenses` command; built with [age-encryption](https://github.com/FiloSottile/typage), [vercel-labs/skills](https://github.com/vercel-labs/skills), and the [Agent Skills specification](https://agentskills.io/specification).
