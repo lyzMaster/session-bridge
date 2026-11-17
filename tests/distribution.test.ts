@@ -36,6 +36,10 @@ test("Pages homepage includes complete EN/ZH translations and defaults non-en/zh
   expect(html).toContain('<html lang="en">');
   expect(html).toContain('data-lang="en"');
   expect(html).toContain('data-lang="zh"');
+  expect(html).toContain('data-star');
+  expect(html).toContain('data-star-count');
+  expect(html).toContain('data-motion-toggle');
+  expect(html).toContain('https://github.com/lyzMaster/session-bridge');
   expect(app).toContain("Default non-English / non-Chinese primary device languages to English");
 
   const dictMatch = app.match(/const I18N = (\{[\s\S]*?\n  \});/);
